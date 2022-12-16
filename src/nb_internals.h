@@ -17,7 +17,6 @@
 #  define NB_THREAD_LOCAL __thread
 #endif
 
-
 NAMESPACE_BEGIN(NB_NAMESPACE)
 NAMESPACE_BEGIN(detail)
 
@@ -185,9 +184,6 @@ struct nb_internals {
 
     /// Tensor wrpaper
     PyTypeObject *nb_tensor;
-
-    /// Size fields of PyTypeObject
-    int type_basicsize, type_itemsize;
 
     /// Instance pointer -> Python object mapping
     py_map<std::pair<void *, std::type_index>, nb_inst *, ptr_type_hash>

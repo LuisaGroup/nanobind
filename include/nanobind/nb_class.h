@@ -56,8 +56,8 @@ enum class type_flags : uint32_t {
     /// This type is an arithmetic enumeration
     is_arithmetic            = (1 << 15),
 
-    /// This type is an arithmetic enumeration
-    has_type_callback        = (1 << 16),
+    /// This type provides extra PyType_Slot fields
+    has_type_slots           = (1 << 16),
 
     /// This type does not permit subclassing from Python
     is_final                 = (1 << 17),
@@ -69,7 +69,10 @@ enum class type_flags : uint32_t {
     has_dynamic_attr         = (1 << 19),
 
     /// The class uses an intrusive reference counting approach
-    intrusive_ptr            = (1 << 20)
+    intrusive_ptr            = (1 << 20),
+
+    /// Is this a trampoline class meant to be overloaded in Python?
+    is_trampoline            = (1 << 21)
 };
 
 struct type_data {
@@ -88,7 +91,7 @@ struct type_data {
     void (*move)(void *, void *) noexcept;
     const std::type_info **implicit;
     bool (**implicit_py)(PyTypeObject *, PyObject *, cleanup_list *) noexcept;
-    void (*type_callback)(PyType_Slot **) noexcept;
+    PyType_Slot *type_slots;
     void *supplement;
     void (*set_self_py)(void *, PyObject *) noexcept;
 #if defined(Py_LIMITED_API)
@@ -106,9 +109,9 @@ NB_INLINE void type_extra_apply(type_data &t, const char *doc) {
     t.doc = doc;
 }
 
-NB_INLINE void type_extra_apply(type_data &t, type_callback c) {
-    t.flags |= (uint32_t) type_flags::has_type_callback;
-    t.type_callback = c.value;
+NB_INLINE void type_extra_apply(type_data &t, type_slots c) {
+    t.flags |= (uint32_t) type_flags::has_type_slots;
+    t.type_slots = c.value;
 }
 
 template <typename T>
@@ -262,32 +265,35 @@ public:
 
         if constexpr (!std::is_same_v<Base, T>) {
             d.base = &typeid(Base);
-            d.flags |= (uint16_t) detail::type_flags::has_base;
+            d.flags |= (uint32_t) detail::type_flags::has_base;
         }
 
+        if constexpr (!std::is_same_v<Alias, T>)
+            d.flags |= (uint32_t) detail::type_flags::is_trampoline;
+
         if constexpr (std::is_copy_constructible_v<T>) {
-            d.flags |= (uint16_t) detail::type_flags::is_copy_constructible;
+            d.flags |= (uint32_t) detail::type_flags::is_copy_constructible;
 
             if constexpr (!std::is_trivially_copy_constructible_v<T>) {
-                d.flags |= (uint16_t) detail::type_flags::has_copy;
+                d.flags |= (uint32_t) detail::type_flags::has_copy;
                 d.copy = detail::wrap_copy<T>;
             }
         }
 
         if constexpr (std::is_move_constructible_v<T>) {
-            d.flags |= (uint16_t) detail::type_flags::is_move_constructible;
+            d.flags |= (uint32_t) detail::type_flags::is_move_constructible;
 
             if constexpr (!std::is_trivially_move_constructible_v<T>) {
-                d.flags |= (uint16_t) detail::type_flags::has_move;
+                d.flags |= (uint32_t) detail::type_flags::has_move;
                 d.move = detail::wrap_move<T>;
             }
         }
 
         if constexpr (std::is_destructible_v<T>) {
-            d.flags |= (uint16_t) detail::type_flags::is_destructible;
+            d.flags |= (uint32_t) detail::type_flags::is_destructible;
 
             if constexpr (!std::is_trivially_destructible_v<T>) {
-                d.flags |= (uint16_t) detail::type_flags::has_destruct;
+                d.flags |= (uint32_t) detail::type_flags::has_destruct;
                 d.destruct = detail::wrap_destruct<T>;
             }
         }
@@ -385,9 +391,11 @@ public:
         static_assert(std::is_base_of_v<C, T>,
                       "def_readwrite() requires a (base) class member!");
 
+        using Q = std::conditional_t<detail::make_caster<D>::IsClass, const D &, D &&>;
+
         def_property(name,
             [pm](const T &c) -> const D & { return c.*pm; },
-            [pm](T &c, const D &value) { c.*pm = value; },
+            [pm](T &c, Q value) { c.*pm = (Q) value; },
             extra...);
 
         return *this;
@@ -396,9 +404,11 @@ public:
     template <typename D, typename... Extra>
     NB_INLINE class_ &def_readwrite_static(const char *name, D *pm,
                                            const Extra &...extra) {
+        using Q = std::conditional_t<detail::make_caster<D>::IsClass, const D &, D &&>;
+
         def_property_static(name,
             [pm](handle) -> const D & { return *pm; },
-            [pm](handle, const D &value) { *pm = value; }, extra...);
+            [pm](handle, Q value) { *pm = (Q) value; }, extra...);
 
         return *this;
     }

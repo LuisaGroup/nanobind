@@ -15,7 +15,7 @@ NAMESPACE_BEGIN(NB_NAMESPACE)
 NAMESPACE_BEGIN(detail)
 
 template <typename Value_, typename Key> struct set_caster {
-    NB_TYPE_CASTER(Value_, const_name("set[") + make_caster<Key>::Name + const_name("]"));
+    NB_TYPE_CASTER(Value_, const_name(NB_TYPING_SET "[") + make_caster<Key>::Name + const_name("]"));
 
     using KeyCaster = make_caster<Key>;
 
@@ -32,7 +32,7 @@ template <typename Value_, typename Key> struct set_caster {
         KeyCaster key_caster;
         PyObject *key;
 
-        while ((key = PyIter_Next(iter))) {
+        while ((key = PyIter_Next(iter)) != nullptr) {
             success &= key_caster.from_python(key, flags, cleanup);
             Py_DECREF(key);
 

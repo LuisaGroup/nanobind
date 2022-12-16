@@ -131,23 +131,37 @@ PyObject *module_import(const char *name) {
 
 PyObject *module_new_submodule(PyObject *base, const char *name,
                                const char *doc) noexcept {
+    PyObject *name_py, *res;
 
-    PyObject *base_name = PyModule_GetNameObject(base),
-             *name_py, *res;
+#if !defined(PYPY_VERSION)
+    PyObject *base_name = PyModule_GetNameObject(base);
     if (!base_name)
         goto fail;
 
     name_py = PyUnicode_FromFormat("%U.%s", base_name, name);
+#else
+    const char *base_name = PyModule_GetName(base);
+    if (!base_name)
+        goto fail;
+
+    name_py = PyUnicode_FromFormat("%s.%s", base_name, name);
+#endif
     if (!name_py)
         goto fail;
 
+#if !defined(PYPY_VERSION)
     res = PyImport_AddModuleObject(name_py);
+#else
+    res = PyImport_AddModule(PyUnicode_AsUTF8(name_py));
+#endif
+
     if (doc) {
         PyObject *doc_py = PyUnicode_FromString(doc);
         if (!doc_py || PyObject_SetAttrString(res, "__doc__", doc_py))
             goto fail;
         Py_DECREF(doc_py);
     }
+
     Py_DECREF(name_py);
     Py_DECREF(base_name);
 
@@ -200,50 +214,6 @@ PyObject *obj_op_2(PyObject *a, PyObject *b,
     return res;
 }
 
-#if defined(Py_LIMITED_API)
-PyObject *_PyObject_Vectorcall(PyObject *base, PyObject *const *args,
-                               size_t nargsf, PyObject *kwnames) {
-    size_t nargs = NB_VECTORCALL_NARGS(nargsf);
-
-    PyObject *args_tuple = PyTuple_New(nargs);
-    if (!args_tuple)
-        return nullptr;
-
-    for (size_t i = 0; i < nargs; ++i) {
-        Py_INCREF(args[i]);
-        NB_TUPLE_SET_ITEM(args_tuple, i, args[i]);
-    }
-
-    PyObject *kwargs = nullptr;
-    if (kwnames) {
-        kwargs = PyDict_New();
-        if (!kwargs) {
-            Py_DECREF(args_tuple);
-            return nullptr;
-        }
-
-        for (size_t i = 0, l = NB_TUPLE_GET_SIZE(kwnames); i < l; ++i) {
-            PyObject *k = NB_TUPLE_GET_ITEM(kwnames, i),
-                     *v = args[i + nargs];
-            if (PyDict_SetItem(kwargs, k, v)) {
-                Py_DECREF(kwargs);
-                Py_DECREF(args_tuple);
-                return nullptr;
-            }
-
-        }
-    }
-
-    PyObject *res = PyObject_Call(base, args_tuple, kwargs);
-
-    Py_DECREF(args_tuple);
-    Py_XDECREF(kwargs);
-
-    return res;
-}
-#endif
-
-
 PyObject *obj_vectorcall(PyObject *base, PyObject *const *args, size_t nargsf,
                          PyObject *kwnames, bool method_call) {
     const char *error = nullptr;
@@ -266,7 +236,7 @@ PyObject *obj_vectorcall(PyObject *base, PyObject *const *args, size_t nargsf,
         }
     }
 
-#if PY_VERSION_HEX < 0x03090000 || defined(Py_LIMITED_API)
+#if PY_VERSION_HEX < 0x03090000
     if (method_call) {
         PyObject *self = PyObject_GetAttr(args[0], /* name = */ base);
         if (self) {
@@ -345,7 +315,7 @@ PyObject *getattr(PyObject *obj, PyObject *key, PyObject *def) noexcept {
     return def;
 }
 
-void getattr_maybe(PyObject *obj, const char *key, PyObject **out) {
+void getattr_or_raise(PyObject *obj, const char *key, PyObject **out) {
     if (*out)
         return;
 
@@ -356,7 +326,7 @@ void getattr_maybe(PyObject *obj, const char *key, PyObject **out) {
     *out = res;
 }
 
-void getattr_maybe(PyObject *obj, PyObject *key, PyObject **out) {
+void getattr_or_raise(PyObject *obj, PyObject *key, PyObject **out) {
     if (*out)
         return;
 
@@ -381,7 +351,7 @@ void setattr(PyObject *obj, PyObject *key, PyObject *value) {
 
 // ========================================================================
 
-void getitem_maybe(PyObject *obj, Py_ssize_t key, PyObject **out) {
+void getitem_or_raise(PyObject *obj, Py_ssize_t key, PyObject **out) {
     if (*out)
         return;
 
@@ -392,7 +362,7 @@ void getitem_maybe(PyObject *obj, Py_ssize_t key, PyObject **out) {
     *out = res;
 }
 
-void getitem_maybe(PyObject *obj, const char *key_, PyObject **out) {
+void getitem_or_raise(PyObject *obj, const char *key_, PyObject **out) {
     if (*out)
         return;
 
@@ -411,7 +381,7 @@ void getitem_maybe(PyObject *obj, const char *key_, PyObject **out) {
     *out = res;
 }
 
-void getitem_maybe(PyObject *obj, PyObject *key, PyObject **out) {
+void getitem_or_raise(PyObject *obj, PyObject *key, PyObject **out) {
     if (*out)
         return;
 
@@ -512,7 +482,7 @@ PyObject **seq_get(PyObject *seq, size_t *size_out, PyObject **temp_out) noexcep
        goes wrong, it fails gracefully without reporting errors. Other
        overloads will then be tried. */
 
-#if !defined(Py_LIMITED_API)
+#if !defined(Py_LIMITED_API) && !defined(PYPY_VERSION)
     if (PyTuple_CheckExact(seq)) {
         size = (size_t) PyTuple_GET_SIZE(seq);
         result = ((PyTupleObject *) seq)->ob_item;
@@ -605,7 +575,7 @@ PyObject **seq_get_with_size(PyObject *seq, size_t size,
     PyObject *temp = nullptr,
              **result = nullptr;
 
-#if !defined(Py_LIMITED_API)
+#if !defined(Py_LIMITED_API) && !defined(PYPY_VERSION)
     if (PyTuple_CheckExact(seq)) {
         if (size == (size_t) PyTuple_GET_SIZE(seq)) {
             result = ((PyTupleObject *) seq)->ob_item;
@@ -743,112 +713,177 @@ void print(PyObject *value, PyObject *end, PyObject *file) {
 
 // ========================================================================
 
-std::pair<double, bool> load_f64(PyObject *o, uint8_t flags) noexcept {
-    const bool convert = flags & (uint8_t) cast_flags::convert;
+bool load_f64(PyObject *o, uint8_t flags, double *out) noexcept {
+    bool is_float = PyFloat_CheckExact(o);
 
-    if (convert || PyFloat_Check(o)) {
-        double result = PyFloat_AsDouble(o);
-
-        if (result != -1.0 || !PyErr_Occurred())
-            return { result, true };
-        else
-            PyErr_Clear();
+#if !defined(Py_LIMITED_API)
+    if (NB_LIKELY(is_float)) {
+        *out = (double) PyFloat_AS_DOUBLE(o);
+        return true;
     }
 
-    return { 0.0, false };
-}
+    is_float = false;
+#endif
 
-std::pair<float, bool> load_f32(PyObject *o, uint8_t flags) noexcept {
-    const bool convert = flags & (uint8_t) cast_flags::convert;
-    if (convert || PyFloat_Check(o)) {
+    if (is_float || (flags & (uint8_t) cast_flags::convert)) {
         double result = PyFloat_AsDouble(o);
 
-        if (result != -1.0 || !PyErr_Occurred())
-            return { (float) result, true };
-        else
-            PyErr_Clear();
-    }
-
-    return { 0.f, false };
-}
-
-template <typename T>
-NB_INLINE std::pair<T, bool> load_int(PyObject *o, uint32_t flags) noexcept {
-    using T0 = std::conditional_t<sizeof(T) <= sizeof(long), long, long long>;
-    using Tp = std::conditional_t<std::is_signed_v<T>, T0, std::make_unsigned_t<T0>>;
-
-    const bool convert = flags & (uint8_t) cast_flags::convert;
-    object temp;
-
-    if (!PyLong_Check(o)) {
-        if (convert) {
-            if constexpr (std::is_unsigned_v<T>) {
-                // Unsigned PyLong_* conversions don't call __index__()..
-                temp = steal(PyNumber_Long(o));
-                if (!temp.is_valid()) {
-                    PyErr_Clear();
-                    return { T(0), false };
-                }
-
-                o = temp.ptr();
-            }
+        if (result != -1.0 || !PyErr_Occurred()) {
+            *out = (double) result;
+            return true;
         } else {
-            return { T(0), false };
+            PyErr_Clear();
         }
     }
 
-    Tp value_p;
-    if constexpr (std::is_unsigned_v<Tp>) {
-        value_p = sizeof(T) <= sizeof(long) ? (Tp) PyLong_AsUnsignedLong(o)
-                                            : (Tp) PyLong_AsUnsignedLongLong(o);
-    } else {
-        value_p = sizeof(T) <= sizeof(long) ? (Tp) PyLong_AsLong(o)
-                                            : (Tp) PyLong_AsLongLong(o);
+    return false;
+}
+
+bool load_f32(PyObject *o, uint8_t flags, float *out) noexcept {
+    bool is_float = PyFloat_CheckExact(o);
+
+#if !defined(Py_LIMITED_API)
+    if (NB_LIKELY(is_float)) {
+        *out = (float) PyFloat_AS_DOUBLE(o);
+        return true;
     }
 
-    if (value_p == Tp(-1) && PyErr_Occurred()) {
-        PyErr_Clear();
-        return { T(0), false };
+    is_float = false;
+#endif
+
+    if (is_float || (flags & (uint8_t) cast_flags::convert)) {
+        double result = PyFloat_AsDouble(o);
+
+        if (result != -1.0 || !PyErr_Occurred()) {
+            *out = (float) result;
+            return true;
+        } else {
+            PyErr_Clear();
+        }
     }
 
-    T value = (T) value_p;
-    if constexpr (sizeof(Tp) != sizeof(T)) {
-        if (value_p != (Tp) value)
-            return { T(0), false };
+    return false;
+}
+
+template <typename T, bool Recurse = true>
+NB_INLINE bool load_int(PyObject *o, uint32_t flags, T *out) noexcept {
+    if (NB_LIKELY(PyLong_CheckExact(o))) {
+        // Fast path for integers that aren't too large (max. one 15- or 30-bit "digit")
+        #if !defined(Py_LIMITED_API) && !defined(PYPY_VERSION)
+            PyLongObject *lo = (PyLongObject *) o;
+            int size = Py_SIZE(o);
+
+            if (size == 0 || size == 1) {
+                digit value_d = lo->ob_digit[0];
+                T value = (T) value_d;
+                *out = value;
+                return sizeof(T) >= sizeof(digit) || value_d == (digit) value;
+            }
+
+            if constexpr (std::is_unsigned_v<T>) {
+                if (size < 0)
+                    return false;
+            } else {
+                if (size == -1) {
+                    sdigit value_d = - (sdigit) lo->ob_digit[0];
+                    T value = (T) value_d;
+                    *out = value;
+                    return sizeof(T) >= sizeof(sdigit) || value_d == (sdigit) value;
+                }
+            }
+        #endif
+
+
+        // Slow path
+        using T0 = std::conditional_t<sizeof(T) <= sizeof(long), long, long long>;
+        using Tp = std::conditional_t<std::is_signed_v<T>, T0, std::make_unsigned_t<T0>>;
+
+        Tp value_p;
+        if constexpr (std::is_unsigned_v<Tp>)
+            value_p = sizeof(T) <= sizeof(long) ? (Tp) PyLong_AsUnsignedLong(o)
+                                                : (Tp) PyLong_AsUnsignedLongLong(o);
+        else
+            value_p = sizeof(T) <= sizeof(long) ? (Tp) PyLong_AsLong(o)
+                                                : (Tp) PyLong_AsLongLong(o);
+
+        if (value_p == Tp(-1) && PyErr_Occurred()) {
+            PyErr_Clear();
+            return false;
+        }
+
+        T value = (T) value_p;
+        if constexpr (sizeof(Tp) != sizeof(T)) {
+            if (value_p != (Tp) value)
+                return false;
+        }
+
+        *out = value;
+        return true;
+    } else if (Recurse && (flags & (uint8_t) cast_flags::convert) && !PyFloat_Check(o)) {
+        PyObject *temp = PyNumber_Long(o);
+        if (temp) {
+            bool result = load_int<T, false>(temp, 0, out);
+            Py_DECREF(temp);
+            return result;
+        } else {
+            PyErr_Clear();
+        }
     }
-    return { value, true };
+
+    return false;
 }
 
-std::pair<uint8_t, bool> load_u8(PyObject *o, uint8_t flags) noexcept {
-    return load_int<uint8_t>(o, flags);
+bool load_u8(PyObject *o, uint8_t flags, uint8_t *out) noexcept {
+    return load_int(o, flags, out);
 }
 
-std::pair<int8_t, bool> load_i8(PyObject *o, uint8_t flags) noexcept {
-    return load_int<int8_t>(o, flags);
+bool load_i8(PyObject *o, uint8_t flags, int8_t *out) noexcept {
+    return load_int(o, flags, out);
 }
 
-std::pair<uint16_t, bool> load_u16(PyObject *o, uint8_t flags) noexcept {
-    return load_int<uint16_t>(o, flags);
+bool load_u16(PyObject *o, uint8_t flags, uint16_t *out) noexcept {
+    return load_int(o, flags, out);
 }
 
-std::pair<int16_t, bool> load_i16(PyObject *o, uint8_t flags) noexcept {
-    return load_int<int16_t>(o, flags);
+bool load_i16(PyObject *o, uint8_t flags, int16_t *out) noexcept {
+    return load_int(o, flags, out);
 }
 
-std::pair<uint32_t, bool> load_u32(PyObject *o, uint8_t flags) noexcept {
-    return load_int<uint32_t>(o, flags);
+bool load_u32(PyObject *o, uint8_t flags, uint32_t *out) noexcept {
+    return load_int(o, flags, out);
 }
 
-std::pair<int32_t, bool> load_i32(PyObject *o, uint8_t flags) noexcept {
-    return load_int<int32_t>(o, flags);
+bool load_i32(PyObject *o, uint8_t flags, int32_t *out) noexcept {
+    return load_int(o, flags, out);
 }
 
-std::pair<uint64_t, bool> load_u64(PyObject *o, uint8_t flags) noexcept {
-    return load_int<uint64_t>(o, flags);
+bool load_u64(PyObject *o, uint8_t flags, uint64_t *out) noexcept {
+    return load_int(o, flags, out);
 }
 
-std::pair<int64_t, bool> load_i64(PyObject *o, uint8_t flags) noexcept {
-    return load_int<int64_t>(o, flags);
+bool load_i64(PyObject *o, uint8_t flags, int64_t *out) noexcept {
+    return load_int(o, flags, out);
+}
+
+
+// ========================================================================
+
+void incref_checked(PyObject *o) noexcept {
+    if (!o)
+        return;
+    if (!PyGILState_Check())
+        fail("nanobind::detail::incref_check(): attempted to change the "
+             "reference count of a Python object while the GIL was not held.");
+    Py_INCREF(o);
+}
+
+void decref_checked(PyObject *o) noexcept {
+    if (!o)
+        return;
+    if (!PyGILState_Check())
+        fail("nanobind::detail::decref_check(): attempted to change the "
+             "reference count of a Python object while the GIL was not held.");
+    Py_DECREF(o);
 }
 
 NAMESPACE_END(detail)

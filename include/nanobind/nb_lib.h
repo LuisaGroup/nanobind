@@ -124,8 +124,8 @@ NB_CORE PyObject *getattr(PyObject *obj, const char *key, PyObject *def) noexcep
 NB_CORE PyObject *getattr(PyObject *obj, PyObject *key, PyObject *def) noexcept;
 
 /// Get an object attribute or raise an exception. Skip if 'out' is non-null
-NB_CORE void getattr_maybe(PyObject *obj, const char *key, PyObject **out);
-NB_CORE void getattr_maybe(PyObject *obj, PyObject *key, PyObject **out);
+NB_CORE void getattr_or_raise(PyObject *obj, const char *key, PyObject **out);
+NB_CORE void getattr_or_raise(PyObject *obj, PyObject *key, PyObject **out);
 
 /// Set an object attribute / item
 NB_CORE void setattr(PyObject *obj, const char *key, PyObject *value);
@@ -134,9 +134,9 @@ NB_CORE void setattr(PyObject *obj, PyObject *key, PyObject *value);
 // ========================================================================
 
 /// Index into an object or raise an exception. Skip if 'out' is non-null
-NB_CORE void getitem_maybe(PyObject *obj, Py_ssize_t, PyObject **out);
-NB_CORE void getitem_maybe(PyObject *obj, const char *key, PyObject **out);
-NB_CORE void getitem_maybe(PyObject *obj, PyObject *key, PyObject **out);
+NB_CORE void getitem_or_raise(PyObject *obj, Py_ssize_t, PyObject **out);
+NB_CORE void getitem_or_raise(PyObject *obj, const char *key, PyObject **out);
+NB_CORE void getitem_or_raise(PyObject *obj, PyObject *key, PyObject **out);
 
 /// Set an item or raise an exception
 NB_CORE void setitem(PyObject *obj, Py_ssize_t, PyObject *value);
@@ -387,16 +387,24 @@ NB_CORE PyObject *exception_new(PyObject *mod, const char *name,
 
 // ========================================================================
 
-NB_CORE std::pair<int8_t, bool>   load_i8 (PyObject *o, uint8_t flags) noexcept;
-NB_CORE std::pair<uint8_t, bool>  load_u8 (PyObject *o, uint8_t flags) noexcept;
-NB_CORE std::pair<int16_t, bool>  load_i16(PyObject *o, uint8_t flags) noexcept;
-NB_CORE std::pair<uint16_t, bool> load_u16(PyObject *o, uint8_t flags) noexcept;
-NB_CORE std::pair<int32_t, bool>  load_i32(PyObject *o, uint8_t flags) noexcept;
-NB_CORE std::pair<uint32_t, bool> load_u32(PyObject *o, uint8_t flags) noexcept;
-NB_CORE std::pair<int64_t, bool>  load_i64(PyObject *o, uint8_t flags) noexcept;
-NB_CORE std::pair<uint64_t, bool> load_u64(PyObject *o, uint8_t flags) noexcept;
-NB_CORE std::pair<float, bool>    load_f32(PyObject *o, uint8_t flags) noexcept;
-NB_CORE std::pair<double, bool>   load_f64(PyObject *o, uint8_t flags) noexcept;
+NB_CORE bool load_i8 (PyObject *o, uint8_t flags, int8_t *out) noexcept;
+NB_CORE bool load_u8 (PyObject *o, uint8_t flags, uint8_t *out) noexcept;
+NB_CORE bool load_i16(PyObject *o, uint8_t flags, int16_t *out) noexcept;
+NB_CORE bool load_u16(PyObject *o, uint8_t flags, uint16_t *out) noexcept;
+NB_CORE bool load_i32(PyObject *o, uint8_t flags, int32_t *out) noexcept;
+NB_CORE bool load_u32(PyObject *o, uint8_t flags, uint32_t *out) noexcept;
+NB_CORE bool load_i64(PyObject *o, uint8_t flags, int64_t *out) noexcept;
+NB_CORE bool load_u64(PyObject *o, uint8_t flags, uint64_t *out) noexcept;
+NB_CORE bool load_f32(PyObject *o, uint8_t flags, float *out) noexcept;
+NB_CORE bool load_f64(PyObject *o, uint8_t flags, double *out) noexcept;
+
+// ========================================================================
+
+/// Increase the reference count of 'o', and check that the GIL is held
+NB_CORE void incref_checked(PyObject *o) noexcept;
+
+/// Decrease the reference count of 'o', and check that the GIL is held
+NB_CORE void decref_checked(PyObject *o) noexcept;
 
 NAMESPACE_END(detail)
 NAMESPACE_END(NB_NAMESPACE)

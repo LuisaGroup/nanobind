@@ -56,9 +56,15 @@ NB_INLINE PyObject *func_create(Func &&func, Return (*)(Args...),
     // Collect function signature information for the docstring
     using cast_out = make_caster<
         std::conditional_t<std::is_void_v<Return>, void_type, Return>>;
-    constexpr auto descr = const_name("(") +
-                           concat(type_descr(make_caster<remove_opt_mono_t<intrinsic_t<Args>>>::Name)...) +
-                           const_name(") -> ") + cast_out::Name;
+
+    // Compile-time function signature
+    static constexpr auto descr =
+        const_name("(") +
+        concat(type_descr(
+            make_caster<remove_opt_mono_t<intrinsic_t<Args>>>::Name)...) +
+        const_name(") -> ") + cast_out::Name;
+
+    // std::type_info for all function arguments
     const std::type_info* descr_types[descr.type_count() + 1];
     descr.put_types(descr_types);
 
@@ -97,7 +103,7 @@ NB_INLINE PyObject *func_create(Func &&func, Return (*)(Args...),
     }
 
     f.impl = [](void *p, PyObject **args, uint8_t *args_flags, rv_policy policy,
-                cleanup_list *cleanup) -> PyObject * {
+                cleanup_list *cleanup) NB_INLINE_LAMBDA -> PyObject * {
         (void)p; (void)args; (void)args_flags; (void)policy; (void)cleanup;
 
         const capture *cap;
@@ -116,8 +122,8 @@ NB_INLINE PyObject *func_create(Func &&func, Return (*)(Args...),
         PyObject *result;
         if constexpr (std::is_void_v<Return>) {
             cap->func(((make_caster<Args>&&) in.template get<Is>()).operator cast_t<Args>()...);
-            Py_INCREF(Py_None);
             result = Py_None;
+            Py_INCREF(result);
         } else {
             result = cast_out::from_cpp(
                        cap->func(((make_caster<Args> &&) in.template get<Is>())
@@ -132,7 +138,7 @@ NB_INLINE PyObject *func_create(Func &&func, Return (*)(Args...),
 
     f.descr = descr.text;
     f.descr_types = descr_types;
-    f.nargs = (uint16_t) nargs;
+    f.nargs = nargs;
 
     // Fill remaining fields of 'f'
     size_t arg_index = 0;

@@ -48,6 +48,14 @@
 #  define NB_NAMESPACE nanobind
 #endif
 
+#if defined(__GNUC__)
+#  define NB_UNLIKELY(x) __builtin_expect(bool(x), 0)
+#  define NB_LIKELY(x)   __builtin_expect(bool(x), 1)
+#else
+#  define NB_LIKELY(x) x
+#  define NB_UNLIKELY(x) x
+#endif
+
 #if defined(NB_SHARED)
 #  if defined(NB_BUILD)
 #    define NB_CORE NB_EXPORT
@@ -84,7 +92,24 @@
 #  define NB_VECTORCALL_NARGS(n) ((n) & ~NB_VECTORCALL_ARGUMENTS_OFFSET)
 #endif
 
+#if PY_VERSION_HEX < 0x03090000
+#  define NB_TYPING_DICT "Dict"
+#  define NB_TYPING_LIST "List"
+#  define NB_TYPING_SET "Set"
+#  define NB_TYPING_TUPLE "Tuple"
+#  define NB_TYPING_TYPE "Type"
+#else
+#  define NB_TYPING_DICT "dict"
+#  define NB_TYPING_LIST "list"
+#  define NB_TYPING_SET "set"
+#  define NB_TYPING_TUPLE "tuple"
+#  define NB_TYPING_TYPE "type"
+#endif
+
 #if defined(Py_LIMITED_API)
+#  if PY_VERSION_HEX < 0x030C0000 || defined(PYPY_VERSION)
+#    error "nanobind can target Python's limited API, but this requires CPython >= 3.12"
+#  endif
 #  define NB_TUPLE_GET_SIZE PyTuple_Size
 #  define NB_TUPLE_GET_ITEM PyTuple_GetItem
 #  define NB_TUPLE_SET_ITEM PyTuple_SetItem
@@ -102,6 +127,9 @@
 #  define NB_DICT_GET_SIZE PyDict_GET_SIZE
 #endif
 
+#if defined(PYPY_VERSION_NUM) && PYPY_VERSION_NUM < 0x07030a00
+#    error "nanobind requires a newer PyPy version (>= 7.3.10)"
+#endif
 
 #define NB_MODULE(name, variable)                                              \
     extern "C" [[maybe_unused]] NB_EXPORT PyObject *PyInit_##name();           \
@@ -110,11 +138,11 @@
                                            name)(::nanobind::module_ &);       \
     extern "C" NB_EXPORT PyObject *PyInit_##name() {                           \
         nanobind::module_ m =                                                  \
-            nanobind::borrow<nanobind::module_>(nanobind::detail::module_new(  \
+            nanobind::steal<nanobind::module_>(nanobind::detail::module_new(   \
                 NB_TOSTRING(name), &NB_CONCAT(nanobind_module_def_, name)));   \
         try {                                                                  \
             NB_CONCAT(nanobind_init_, name)(m);                                \
-            return m.ptr();                                                    \
+            return m.release().ptr();                                          \
         } catch (const std::exception &e) {                                    \
             PyErr_SetString(PyExc_ImportError, e.what());                      \
             return nullptr;                                                    \

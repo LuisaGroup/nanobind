@@ -12,11 +12,11 @@ NAMESPACE_BEGIN(NB_NAMESPACE)
 /// Macro defining functions/constructors for nanobind::handle subclasses
 #define NB_OBJECT(Type, Parent, Str, Check)                                    \
 public:                                                                        \
-    static constexpr auto Name = detail::const_name(Str);                      \
-    NB_INLINE Type(handle h, detail::borrow_t)                                 \
-        : Parent(h, detail::borrow_t{}) {}                                     \
-    NB_INLINE Type(handle h, detail::steal_t)                                  \
-        : Parent(h, detail::steal_t{}) {}                                      \
+    static constexpr auto Name = ::nanobind::detail::const_name(Str);          \
+    NB_INLINE Type(handle h, ::nanobind::detail::borrow_t)                     \
+        : Parent(h, ::nanobind::detail::borrow_t{}) {}                         \
+    NB_INLINE Type(handle h, ::nanobind::detail::steal_t)                      \
+        : Parent(h, ::nanobind::detail::steal_t{}) {}                          \
     NB_INLINE static bool check_(handle h) {                                   \
         return Check(h.ptr());                                                 \
     }
@@ -156,8 +156,23 @@ public:
     NB_INLINE handle(const PyObject *ptr) : m_ptr((PyObject *) ptr) { }
     NB_INLINE handle(const PyTypeObject *ptr) : m_ptr((PyObject *) ptr) { }
 
-    const handle& inc_ref() const & noexcept { Py_XINCREF(m_ptr); return *this; }
-    const handle& dec_ref() const & noexcept { Py_XDECREF(m_ptr); return *this; }
+    const handle& inc_ref() const & noexcept {
+#if defined(NDEBUG)
+        Py_XINCREF(m_ptr);
+#else
+        detail::incref_checked(m_ptr);
+#endif
+        return *this;
+    }
+
+    const handle& dec_ref() const & noexcept {
+#if defined(NDEBUG)
+        Py_XDECREF(m_ptr);
+#else
+        detail::decref_checked(m_ptr);
+#endif
+        return *this;
+    }
 
     NB_INLINE operator bool() const { return m_ptr != nullptr; }
     NB_INLINE PyObject *ptr() const { return m_ptr; }
@@ -342,7 +357,7 @@ class tuple : public object {
     template <typename T, detail::enable_if_t<std::is_arithmetic_v<T>> = 1>
     detail::accessor<detail::num_item_tuple> operator[](T key) const;
 
-#if !defined(Py_LIMITED_API)
+#if !defined(Py_LIMITED_API) && !defined(PYPY_VERSION)
     detail::fast_iterator begin() const;
     detail::fast_iterator end() const;
 #endif
@@ -362,7 +377,7 @@ class list : public object {
     template <typename T, detail::enable_if_t<std::is_arithmetic_v<T>> = 1>
     detail::accessor<detail::num_item_list> operator[](T key) const;
 
-#if !defined(Py_LIMITED_API)
+#if !defined(Py_LIMITED_API) && !defined(PYPY_VERSION)
     detail::fast_iterator begin() const;
     detail::fast_iterator end() const;
 #endif
@@ -469,6 +484,37 @@ inline iterator iter(handle h) {
     return steal<iterator>(detail::obj_iter(h.ptr()));
 }
 
+class slice : public object {
+public:
+    NB_OBJECT_DEFAULT(slice, object, "slice", PySlice_Check)
+    slice(handle start, handle stop, handle step) {
+        m_ptr = PySlice_New(start.ptr(), stop.ptr(), step.ptr());
+        if (!m_ptr)
+            detail::raise_python_error();
+    }
+
+    template <typename T, detail::enable_if_t<std::is_arithmetic_v<T>> = 0>
+    explicit slice(T stop) : slice(Py_None, int_(stop), Py_None) {}
+    template <typename T, detail::enable_if_t<std::is_arithmetic_v<T>> = 0>
+    slice(T start, T stop) : slice(int_(start), int_(stop), Py_None) {}
+    template <typename T, detail::enable_if_t<std::is_arithmetic_v<T>> = 0>
+    slice(T start, T stop, T step) : slice(int_(start), int_(stop), int_(step)) {}
+};
+
+class ellipsis : public object {
+    static bool is_ellipsis(PyObject *obj) { return obj == Py_Ellipsis; }
+
+public:
+    NB_OBJECT(ellipsis, object, "EllipsisType", is_ellipsis)
+    ellipsis() : object(Py_Ellipsis, detail::borrow_t()) {}
+};
+
+class callable : public object {
+public:
+    NB_OBJECT(callable, object, "Callable[..., object]", PyCallable_Check)
+    using object::object;
+};
+
 template <typename T> class handle_t : public handle {
 public:
     static constexpr auto Name = detail::make_caster<T>::Name;
@@ -482,7 +528,7 @@ public:
 
 template <typename T> class type_object_t : public type_object {
 public:
-    static constexpr auto Name = detail::const_name("type[") +
+    static constexpr auto Name = detail::const_name(NB_TYPING_TYPE "[") +
                                  detail::make_caster<T>::Name +
                                  detail::const_name("]");
 
@@ -584,7 +630,7 @@ NAMESPACE_END(detail)
 inline detail::dict_iterator dict::begin() const { return { *this }; }
 inline detail::dict_iterator dict::end() const { return { }; }
 
-#if !defined(Py_LIMITED_API)
+#if !defined(Py_LIMITED_API) && !defined(PYPY_VERSION)
 inline detail::fast_iterator tuple::begin() const {
     return ((PyTupleObject *) m_ptr)->ob_item;
 }

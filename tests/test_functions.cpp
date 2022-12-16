@@ -1,5 +1,6 @@
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/pair.h>
+#include <nanobind/stl/string.h>
 
 namespace nb = nanobind;
 using namespace nb::literals;
@@ -10,6 +11,8 @@ struct my_call_guard {
     my_call_guard() { call_guard_value = 1; }
     ~my_call_guard() { call_guard_value = 2; }
 };
+
+int test_31(int i) noexcept { return i; }
 
 NB_MODULE(test_functions_ext, m) {
     // Function without inputs/outputs
@@ -156,4 +159,44 @@ NB_MODULE(test_functions_ext, m) {
     m.def("test_22", []() -> void * { return (void*) 1; });
     m.def("test_23", []() -> void * { return nullptr; });
     m.def("test_24", [](void *p) { return (uintptr_t) p; }, "p"_a.none());
+
+    // Test slice
+    m.def("test_25", [](nb::slice s) { return s; });
+    m.def("test_26", []() { return nb::slice(4); });
+    m.def("test_27", []() { return nb::slice(1, 10); });
+    m.def("test_28", []() { return nb::slice(5, -5, -2); });
+
+    // Test ellipsis
+    m.def("test_29", [](nb::ellipsis) { return nb::ellipsis(); });
+
+    // Traceback test
+    m.def("test_30", [](nb::callable f) -> std::string {
+        nb::gil_scoped_release g;
+        try {
+            nb::gil_scoped_acquire g2;
+            f();
+        } catch (const nb::python_error &e) {
+            return e.what();
+        }
+        return "Unknown";
+    });
+
+    m.def("test_31", &test_31);
+    m.def("test_32", [](int i) noexcept { return i; });
+
+    m.def("identity_i8", [](int8_t  i) { return i; });
+    m.def("identity_u8", [](uint8_t i) { return i; });
+    m.def("identity_i16", [](int16_t  i) { return i; });
+    m.def("identity_u16", [](uint16_t i) { return i; });
+    m.def("identity_i32", [](int32_t  i) { return i; });
+    m.def("identity_u32", [](uint32_t i) { return i; });
+    m.def("identity_i64", [](int64_t  i) { return i; });
+    m.def("identity_u64", [](uint64_t i) { return i; });
+
+    m.attr("test_33") = nb::cpp_function([](nb::object self, int y) {
+        return nb::cast<int>(self.attr("x")) + y;
+    }, nb::is_method());
+    m.attr("test_34") = nb::cpp_function([](nb::object self, int y) {
+        return nb::cast<int>(self.attr("x")) * y;
+    }, nb::arg("y"), nb::is_method());
 }
