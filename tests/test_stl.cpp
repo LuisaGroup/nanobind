@@ -11,8 +11,9 @@
 #include <nanobind/stl/array.h>
 #include <nanobind/stl/unordered_set.h>
 #include <nanobind/stl/set.h>
+#include <nanobind/stl/filesystem.h>
 
-NB_MAKE_OPAQUE(NB_TYPE(std::vector<float, std::allocator<float>>))
+NB_MAKE_OPAQUE(std::vector<float, std::allocator<float>>)
 
 namespace nb = nanobind;
 
@@ -93,16 +94,16 @@ NB_MODULE(test_stl_ext, m) {
     nb::class_<Movable>(m, "Movable")
         .def(nb::init<>())
         .def(nb::init<int>())
-        .def_readwrite("value", &Movable::value);
+        .def_rw("value", &Movable::value);
 
     nb::class_<Copyable>(m, "Copyable")
         .def(nb::init<>())
         .def(nb::init<int>())
-        .def_readwrite("value", &Copyable::value);
+        .def_rw("value", &Copyable::value);
 
     nb::class_<StructWithReadonlyMap>(m, "StructWithReadonlyMap")
         .def(nb::init<>())
-        .def_readonly("map", &StructWithReadonlyMap::map);
+        .def_ro("map", &StructWithReadonlyMap::map);
 
     // ----- test01-test12 ------
 
@@ -236,8 +237,8 @@ NB_MODULE(test_stl_ext, m) {
 
     nb::class_<FuncWrapper>(m, "FuncWrapper", nb::type_slots(slots))
         .def(nb::init<>())
-        .def_readwrite("f", &FuncWrapper::f)
-        .def_readonly_static("alive", &FuncWrapper::alive);
+        .def_rw("f", &FuncWrapper::f)
+        .def_ro_static("alive", &FuncWrapper::alive);
 
     // ----- test35 ------
     m.def("identity_string", [](std::string& x) { return x; });
@@ -399,11 +400,17 @@ NB_MODULE(test_stl_ext, m) {
         },
         nb::arg("x"));
 
+    // test66
+    m.def("replace_extension", [](std::filesystem::path p, std::string ext) {
+        return p.replace_extension(ext);
+    });
+    m.def("parent_path", [](const std::filesystem::path &p) { return p.parent_path(); });
+
     struct ClassWithMovableField {
         std::vector<Movable> movable;
     };
 
     nb::class_<ClassWithMovableField>(m, "ClassWithMovableField")
         .def(nb::init<>())
-        .def_readwrite("movable", &ClassWithMovableField::movable);
+        .def_rw("movable", &ClassWithMovableField::movable);
 }

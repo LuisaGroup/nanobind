@@ -15,8 +15,7 @@
 NAMESPACE_BEGIN(NB_NAMESPACE)
 NAMESPACE_BEGIN(detail)
 
-NB_CORE void trampoline_new(void **data, size_t size, void *ptr,
-                            const std::type_info *cpp_type) noexcept;
+NB_CORE void trampoline_new(void **data, size_t size, void *ptr) noexcept;
 NB_CORE void trampoline_release(void **data, size_t size) noexcept;
 
 NB_CORE PyObject *trampoline_lookup(void **data, size_t size, const char *name,
@@ -25,8 +24,8 @@ NB_CORE PyObject *trampoline_lookup(void **data, size_t size, const char *name,
 template <size_t Size> struct trampoline {
     mutable void *data[2 * Size + 1];
 
-    NB_INLINE trampoline(void *ptr, const std::type_info *cpp_type) {
-        trampoline_new(data, Size, ptr, cpp_type);
+    NB_INLINE trampoline(void *ptr) {
+        trampoline_new(data, Size, ptr);
     }
 
     NB_INLINE ~trampoline() { trampoline_release(data, Size); }
@@ -39,29 +38,32 @@ template <size_t Size> struct trampoline {
 };
 
 #define NB_TRAMPOLINE(base, size)                                              \
-    nanobind::detail::trampoline<size> nb_trampoline{ this, &typeid(base) };
+    using NBBase = base;                                                       \
+    using NBBase::NBBase;                                                      \
+    nanobind::detail::trampoline<size> nb_trampoline{ this }
 
-#define NB_OVERRIDE_NAME(ret_type, base_type, name, func, ...)                 \
+#define NB_OVERRIDE_NAME(name, func, ...)                                      \
     nanobind::handle nb_key = nb_trampoline.lookup(name, false);               \
+    using nb_ret_type = decltype(NBBase::func(__VA_ARGS__));                   \
     if (nb_key.is_valid()) {                                                   \
         nanobind::gil_scoped_acquire nb_guard;                                 \
-        return nanobind::cast<ret_type>(                                       \
+        return nanobind::cast<nb_ret_type>(                                    \
             nb_trampoline.base().attr(nb_key)(__VA_ARGS__));                   \
-    } else {                                                                   \
-        return base_type::func(__VA_ARGS__);                                   \
-    }
+    } else                                                                     \
+        return NBBase::func(__VA_ARGS__)
 
-#define NB_OVERRIDE_PURE_NAME(ret_type, base_type, name, func, ...)            \
+#define NB_OVERRIDE_PURE_NAME(name, func, ...)                                 \
     nanobind::handle nb_key = nb_trampoline.lookup(name, true);                \
+    using nb_ret_type = decltype(NBBase::func(__VA_ARGS__));                   \
     nanobind::gil_scoped_acquire nb_guard;                                     \
-    return nanobind::cast<ret_type>(                                           \
-        nb_trampoline.base().attr(nb_key)(__VA_ARGS__));
+    return nanobind::cast<nb_ret_type>(                                        \
+        nb_trampoline.base().attr(nb_key)(__VA_ARGS__))
 
-#define NB_OVERRIDE(ret_type, base_type, func, ...)                            \
-    NB_OVERRIDE_NAME(ret_type, base_type, #func, func, __VA_ARGS__)
+#define NB_OVERRIDE(func, ...)                                                 \
+    NB_OVERRIDE_NAME(#func, func, __VA_ARGS__)
 
-#define NB_OVERRIDE_PURE(ret_type, base_type, func, ...)                       \
-    NB_OVERRIDE_PURE_NAME(ret_type, base_type, #func, func, __VA_ARGS__)
+#define NB_OVERRIDE_PURE(func, ...)                                            \
+    NB_OVERRIDE_PURE_NAME(#func, func, __VA_ARGS__)
 
 NAMESPACE_END(detail)
 NAMESPACE_END(NB_NAMESPACE)

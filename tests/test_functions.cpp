@@ -15,6 +15,8 @@ struct my_call_guard {
 int test_31(int i) noexcept { return i; }
 
 NB_MODULE(test_functions_ext, m) {
+    m.doc() = "function testcase";
+
     // Function without inputs/outputs
     m.def("test_01", []() { });
 
@@ -78,6 +80,9 @@ NB_MODULE(test_functions_ext, m) {
     });
 
     /// Test call_guard feature
+    m.def("test_call_guard_wrapper_rvalue_ref", [](int&& i) { return i; },
+          nb::call_guard<my_call_guard>());
+
     m.def("test_call_guard", []() {
         return call_guard_value;
     }, nb::call_guard<my_call_guard>());
@@ -196,7 +201,26 @@ NB_MODULE(test_functions_ext, m) {
     m.attr("test_33") = nb::cpp_function([](nb::object self, int y) {
         return nb::cast<int>(self.attr("x")) + y;
     }, nb::is_method());
+
     m.attr("test_34") = nb::cpp_function([](nb::object self, int y) {
         return nb::cast<int>(self.attr("x")) * y;
     }, nb::arg("y"), nb::is_method());
+
+    m.def("test_35", []() {
+        const char *name = "Foo";
+
+        auto callback = [=]() {
+            return nb::str("Test {}").format(name);
+        };
+
+        return nb::cpp_function(callback);
+    });
+
+    m.def("test_cast_char", [](nb::handle h) {
+        return nb::cast<char>(h);
+    });
+
+    m.def("test_cast_str", [](nb::handle h) {
+        return nb::cast<const char *>(h);
+    });
 }

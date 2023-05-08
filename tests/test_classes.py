@@ -31,6 +31,7 @@ def test01_signature():
     assert t.Struct.value.__doc__ == "value(self) -> int"
     assert t.Struct.create_move.__doc__ == "create_move() -> test_classes_ext.Struct"
     assert t.Struct.set_value.__doc__ == "set_value(self, value: int) -> None"
+    assert t.Struct().set_value.__doc__ == "set_value(self, value: int) -> None"
     assert t.Struct.__doc__ == 'Some documentation'
     assert t.Struct.static_test.__doc__ == (
         "static_test(arg: int, /) -> int\n"
@@ -124,6 +125,13 @@ def test06_reference_internal(clean):
         destructed=2
     )
 
+    # ----
+
+    s = t.PairStruct()
+    s1 = s.s1
+    del s1
+    del s
+
 
 def test07_big():
     x = [t.Big() for i in range(1024)]
@@ -142,6 +150,12 @@ def test08_inheritance():
     assert t.go(dog) == 'Dog says woof'
     assert t.go(cat) == 'Cat says meow'
 
+    assert t.animal_passthrough(dog) is dog
+    assert t.animal_passthrough(cat) is cat
+    assert t.dog_passthrough(dog) is dog
+
+    with pytest.raises(TypeError):
+        t.dog_passthrough(cat)
 
 def test09_method_vectorcall():
     out = []
@@ -175,6 +189,8 @@ def test10_trampoline(clean):
         for _ in range(10):
             assert t.go(d) == 'Dachshund says yap'
 
+        assert t.animal_passthrough(d) is d
+
     a = 0
     class GenericAnimal(t.Animal):
         def what(self):
@@ -191,6 +207,7 @@ def test10_trampoline(clean):
     assert t.go(ga) == 'GenericAnimal says goo'
     assert t.void_ret(ga) is None
     assert a == 1
+    assert t.animal_passthrough(ga) is ga
 
     del ga
     del d
@@ -200,6 +217,12 @@ def test10_trampoline(clean):
         destructed=11
     )
 
+    class GenericDog(t.Dog):
+        pass
+
+    d = GenericDog("GenericDog")
+    assert t.dog_passthrough(d) is d
+    assert t.animal_passthrough(d) is d
 
 def test11_trampoline_failures():
     class Incomplete(t.Animal):
@@ -235,13 +258,13 @@ def test11_trampoline_failures():
 def test12_large_pointers():
     for i in range(1, 10):
         c = t.i2p(i)
-        assert isinstance(c, t.Cat)
+        assert isinstance(c, t.Foo)
         assert t.p2i(c) == i
 
     large = 0xffffffffffffffff
     for i in range(large - 10, large):
         c = t.i2p(i)
-        assert isinstance(c, t.Cat)
+        assert isinstance(c, t.Foo)
         assert t.p2i(c) == i
 
 
@@ -347,6 +370,13 @@ def test16_keep_alive_custom(clean):
     collect()
     assert constructed == 2 and destructed == 2
 
+    with pytest.raises(RuntimeError) as excinfo:
+        s = Struct()
+        x = 5
+        t.keep_alive_ret(x, s)
+
+    assert "nanobind::detail::keep_alive(): could not create a weak reference!" in str(excinfo.value)
+
 def f():
     pass
 
@@ -369,6 +399,9 @@ def test17_name_qualname_module():
     assert MyClass.f.__name__ == 'f'
     assert MyClass.f.__qualname__ == 'MyClass.f'
     assert MyClass.f.__module__ == 'test_classes'
+    assert MyClass().f.__name__ == 'f'
+    assert MyClass().f.__qualname__ == 'MyClass.f'
+    assert MyClass().f.__module__ == 'test_classes'
     assert MyClass.NestedClass.__name__ == 'NestedClass'
     assert MyClass.NestedClass.__qualname__ == 'MyClass.NestedClass'
     assert MyClass.NestedClass.__module__ == 'test_classes'
@@ -380,12 +413,21 @@ def test17_name_qualname_module():
     assert t.f.__module__ == 'test_classes_ext'
     assert t.f.__name__ == 'f'
     assert t.f.__qualname__ == 'f'
+    assert type(t.f).__module__ == 'nanobind'
+    assert type(t.f).__name__ == 'nb_func'
+    assert type(t.f).__qualname__ == 'nb_func'
     assert t.MyClass.__name__ == 'MyClass'
     assert t.MyClass.__qualname__ == 'MyClass'
     assert t.MyClass.__module__ == 'test_classes_ext'
     assert t.MyClass.f.__name__ == 'f'
     assert t.MyClass.f.__qualname__ == 'MyClass.f'
     assert t.MyClass.f.__module__ == 'test_classes_ext'
+    assert t.MyClass().f.__name__ == 'f'
+    assert t.MyClass().f.__qualname__ == 'MyClass.f'
+    assert t.MyClass().f.__module__ == 'test_classes_ext'
+    assert type(t.MyClass.f).__module__ == 'nanobind'
+    assert type(t.MyClass.f).__name__ == 'nb_method'
+    assert type(t.MyClass.f).__qualname__ == 'nb_method'
     assert t.MyClass.NestedClass.__name__ == 'NestedClass'
     assert t.MyClass.NestedClass.__qualname__ == 'MyClass.NestedClass'
     assert t.MyClass.NestedClass.__module__ == 'test_classes_ext'
@@ -545,3 +587,45 @@ def test31_cycle():
     a = t.Wrapper()
     a.value = a
     del a
+    collect()
+
+
+def test32_type_checks():
+    v1 = 5
+    v2 = t.Struct()
+
+    assert t.is_int_1(v1) and not t.is_int_1(v2)
+    assert t.is_int_2(v1) and not t.is_int_2(v2)
+    assert not t.is_struct(v1) and t.is_struct(v2)
+
+
+def test33_polymorphic_downcast():
+    assert isinstance(t.factory(), t.Base)
+    assert isinstance(t.factory_2(), t.Base)
+    assert isinstance(t.polymorphic_factory(), t.PolymorphicSubclass)
+    assert isinstance(t.polymorphic_factory_2(), t.PolymorphicBase)
+
+def test34_trampoline_optimization():
+    class Rufus(t.Dog):
+        def __init__(self):
+            super().__init__("woof")
+
+        def name(self):
+            return "Rufus"
+
+    for i in range(2):
+        d1 = t.Dog("woof")
+        d2 = Rufus()
+
+        if i == 0:
+            assert t.go(d1) == 'Dog says woof'
+            assert t.go(d2) == 'Rufus says woof'
+
+        old = t.Dog.name
+        try:
+            t.Dog.name = lambda self: "Max"
+
+            assert t.go(d1) == 'Dog says woof'
+            assert t.go(d2) == 'Rufus says woof'
+        finally:
+            t.Dog.name = old

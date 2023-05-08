@@ -10,13 +10,13 @@
 NAMESPACE_BEGIN(NB_NAMESPACE)
 
 // Forward declarations for types in dlpack.h (1)
-namespace dlpack { struct tensor; struct dtype; }
+namespace dlpack { struct dltensor; struct dtype; }
 
 NAMESPACE_BEGIN(detail)
 
 // Forward declarations for types in dlpack.h (2)
-struct tensor_handle;
-struct tensor_req;
+struct ndarray_handle;
+struct ndarray_req;
 
 /**
  * Helper class to clean temporaries created by function dispatch.
@@ -61,7 +61,6 @@ protected:
     PyObject *m_local[Small];
 };
 
-
 // ========================================================================
 
 /// Raise a std::runtime_error with the given message
@@ -81,10 +80,13 @@ NB_CORE void raise(const char *fmt, ...);
 NB_CORE void fail(const char *fmt, ...) noexcept;
 
 /// Raise nanobind::python_error after an error condition was found
-NB_CORE void raise_python_error();
+[[noreturn]] NB_CORE void raise_python_error();
 
 /// Raise nanobind::next_overload
-NB_CORE void raise_next_overload();
+NB_CORE void raise_next_overload_if_null(void *p);
+
+/// Raise nanobind::cast_error
+NB_CORE void raise_cast_error();
 
 // ========================================================================
 
@@ -127,9 +129,13 @@ NB_CORE PyObject *getattr(PyObject *obj, PyObject *key, PyObject *def) noexcept;
 NB_CORE void getattr_or_raise(PyObject *obj, const char *key, PyObject **out);
 NB_CORE void getattr_or_raise(PyObject *obj, PyObject *key, PyObject **out);
 
-/// Set an object attribute / item
+/// Set an object attribute or raise an exception
 NB_CORE void setattr(PyObject *obj, const char *key, PyObject *value);
 NB_CORE void setattr(PyObject *obj, PyObject *key, PyObject *value);
+
+/// Delete an object attribute or raise an exception
+NB_CORE void delattr(PyObject *obj, const char *key);
+NB_CORE void delattr(PyObject *obj, PyObject *key);
 
 // ========================================================================
 
@@ -147,6 +153,9 @@ NB_CORE void setitem(PyObject *obj, PyObject *key, PyObject *value);
 
 /// Determine the length of a Python object
 NB_CORE size_t obj_len(PyObject *o);
+
+/// Try to roughly determine the length of a Python object
+NB_CORE size_t obj_len_hint(PyObject *o) noexcept;
 
 /// Obtain a string representation of a Python object
 NB_CORE PyObject* obj_repr(PyObject *o);
@@ -206,7 +215,7 @@ NB_CORE PyObject **seq_get(PyObject *seq, size_t *size,
 
 /// Create a new capsule object with a name
 NB_CORE PyObject *capsule_new(const void *ptr, const char *name,
-                              void (*free)(void *) noexcept) noexcept;
+                              void (*cleanup)(void *) noexcept) noexcept;
 
 // ========================================================================
 
@@ -216,8 +225,8 @@ NB_CORE PyObject *nb_func_new(const void *data) noexcept;
 // ========================================================================
 
 /// Create a Python type object for the given type record
-struct type_data;
-NB_CORE PyObject *nb_type_new(const type_data *c) noexcept;
+struct type_init_data;
+NB_CORE PyObject *nb_type_new(const type_init_data *c) noexcept;
 
 /// Extract a pointer to a C++ type underlying a Python object, if possible
 NB_CORE bool nb_type_get(const std::type_info *t, PyObject *o, uint8_t flags,
@@ -226,12 +235,24 @@ NB_CORE bool nb_type_get(const std::type_info *t, PyObject *o, uint8_t flags,
 /// Cast a C++ type instance into a Python object
 NB_CORE PyObject *nb_type_put(const std::type_info *cpp_type, void *value,
                               rv_policy rvp, cleanup_list *cleanup,
-                              bool *is_new) noexcept;
+                              bool *is_new = nullptr) noexcept;
+
+// Special version of nb_type_put for polymorphic classes
+NB_CORE PyObject *nb_type_put_p(const std::type_info *cpp_type,
+                                const std::type_info *cpp_type_p, void *value,
+                                rv_policy rvp, cleanup_list *cleanup,
+                                bool *is_new = nullptr) noexcept;
 
 // Special version of 'nb_type_put' for unique pointers and ownership transfer
 NB_CORE PyObject *nb_type_put_unique(const std::type_info *cpp_type,
                                      void *value, cleanup_list *cleanup,
                                      bool cpp_delete) noexcept;
+
+// Special version of 'nb_type_put_unique' for polymorphic classes
+NB_CORE PyObject *nb_type_put_unique_p(const std::type_info *cpp_type,
+                                       const std::type_info *cpp_type_p,
+                                       void *value, cleanup_list *cleanup,
+                                       bool cpp_delete) noexcept;
 
 /// Try to reliquish ownership from Python object to a unique_ptr
 NB_CORE void nb_type_relinquish_ownership(PyObject *o, bool cpp_delete);
@@ -278,6 +299,9 @@ NB_CORE void nb_inst_copy(PyObject *dst, const PyObject *src) noexcept;
 /// Move-construct 'dst' from 'src', mark it as ready and to be destructed (must have the same nb_type)
 NB_CORE void nb_inst_move(PyObject *dst, const PyObject *src) noexcept;
 
+/// Check if a particular instance uses a Python-derived type
+NB_CORE bool nb_inst_python_derived(PyObject *o) noexcept;
+
 /**
  * This function can be used to manually set two important flags associated with
  * every nanobind instance (``nb_inst``).
@@ -296,8 +320,12 @@ NB_CORE std::pair<bool, bool> nb_inst_state(PyObject *o) noexcept;
 // ========================================================================
 
 // Create and install a Python property object
-NB_CORE void property_install(PyObject *scope, const char *name, bool is_static,
+NB_CORE void property_install(PyObject *scope, const char *name,
                               PyObject *getter, PyObject *setter) noexcept;
+
+NB_CORE void property_install_static(PyObject *scope, const char *name,
+                                     PyObject *getter,
+                                     PyObject *setter) noexcept;
 
 // ========================================================================
 
@@ -307,7 +335,7 @@ NB_CORE PyObject *get_override(void *ptr, const std::type_info *type,
 // ========================================================================
 
 // Ensure that 'patient' cannot be GCed while 'nurse' is alive
-NB_CORE void keep_alive(PyObject *nurse, PyObject *patient) noexcept;
+NB_CORE void keep_alive(PyObject *nurse, PyObject *patient);
 
 // Keep 'payload' alive until 'nurse' is GCed
 NB_CORE void keep_alive(PyObject *nurse, void *payload,
@@ -326,6 +354,10 @@ NB_CORE void implicitly_convertible(bool (*predicate)(PyTypeObject *,
                                     const std::type_info *dst) noexcept;
 
 // ========================================================================
+
+/// Fill in slots for an enum type being built
+NB_CORE void nb_enum_prepare(const type_init_data *t,
+                             PyType_Slot *&slots, size_t max_slots) noexcept;
 
 /// Add an entry to an enumeration
 NB_CORE void nb_enum_put(PyObject *type, const char *name, const void *value,
@@ -349,26 +381,27 @@ NB_CORE PyObject *module_new_submodule(PyObject *base, const char *name,
 
 // ========================================================================
 
-// Try to import a reference-counted tensor object via DLPack
-NB_CORE tensor_handle *tensor_import(PyObject *o, const tensor_req *req,
-                                     bool convert) noexcept;
+// Try to import a reference-counted ndarray object via DLPack
+NB_CORE ndarray_handle *ndarray_import(PyObject *o, const ndarray_req *req,
+                                       bool convert) noexcept;
 
-// Describe a local tensor object using a DLPack capsule
-NB_CORE tensor_handle *tensor_create(void *value, size_t ndim,
-                                     const size_t *shape, PyObject *owner,
-                                     const int64_t *strides,
-                                     dlpack::dtype *dtype, int32_t device,
-                                     int32_t device_id);
+// Describe a local ndarray object using a DLPack capsule
+NB_CORE ndarray_handle *ndarray_create(void *value, size_t ndim,
+                                       const size_t *shape, PyObject *owner,
+                                       const int64_t *strides,
+                                       dlpack::dtype *dtype, int32_t device,
+                                       int32_t device_id);
 
-/// Increase the reference count of the given tensor object; returns a pointer
-/// to the underlying DLtensor
-NB_CORE dlpack::tensor *tensor_inc_ref(tensor_handle *) noexcept;
+/// Increase the reference count of the given ndarray object; returns a pointer
+/// to the underlying DLTensor
+NB_CORE dlpack::dltensor *ndarray_inc_ref(ndarray_handle *) noexcept;
 
-/// Decrease the reference count of the given tensor object
-NB_CORE void tensor_dec_ref(tensor_handle *) noexcept;
+/// Decrease the reference count of the given ndarray object
+NB_CORE void ndarray_dec_ref(ndarray_handle *) noexcept;
 
-/// Wrap a tensor_handle* into a PyCapsule
-NB_CORE PyObject *tensor_wrap(tensor_handle *, int framework) noexcept;
+/// Wrap a ndarray_handle* into a PyCapsule
+NB_CORE PyObject *ndarray_wrap(ndarray_handle *, int framework,
+                               rv_policy policy) noexcept;
 
 // ========================================================================
 
@@ -405,6 +438,26 @@ NB_CORE void incref_checked(PyObject *o) noexcept;
 
 /// Decrease the reference count of 'o', and check that the GIL is held
 NB_CORE void decref_checked(PyObject *o) noexcept;
+
+// ========================================================================
+
+NB_CORE void set_leak_warnings(bool value) noexcept;
+NB_CORE void set_implicit_cast_warnings(bool value) noexcept;
+
+// ========================================================================
+
+NB_CORE bool iterable_check(PyObject *o) noexcept;
+
+// ========================================================================
+
+NB_CORE void slice_compute(PyObject *slice, Py_ssize_t size,
+                           Py_ssize_t &start, Py_ssize_t &stop,
+                           Py_ssize_t &step, size_t &slice_length);
+
+// ========================================================================
+
+NB_CORE PyObject *repr_list(PyObject *o);
+NB_CORE PyObject *repr_map(PyObject *o);
 
 NAMESPACE_END(detail)
 NAMESPACE_END(NB_NAMESPACE)

@@ -115,18 +115,45 @@ PyObject *inst_new_impl(PyTypeObject *tp, void *value) {
     }
 
     // Update hash table that maps from C++ to Python instance
-    auto [it, success] = internals_get().inst_c2p.try_emplace(
-        std::pair<void *, std::type_index>(value, *t->type),
-        self);
+    auto [it, success] =
+        internals_get().inst_c2p.try_emplace(value, self);
 
-    if (!success)
-        fail("nanobind::detail::inst_new(): duplicate object!");
+    if (NB_UNLIKELY(!success)) {
+        void *entry = it->second;
+
+        // Potentially convert the map value into linked list format
+        if (!nb_is_seq(entry)) {
+            nb_inst_seq *first = (nb_inst_seq *) PyMem_Malloc(sizeof(nb_inst_seq));
+            if (NB_UNLIKELY(!first))
+                fail("nanobind::detail::inst_new(): list element allocation failed!");
+            first->inst = (PyObject *) entry;
+            first->next = nullptr;
+            entry = it.value() = nb_mark_seq(first);
+        }
+
+        nb_inst_seq *seq = nb_get_seq(entry);
+        while (true) {
+            if (NB_UNLIKELY((nb_inst *) seq->inst == self))
+                fail("nanobind::detail::inst_new(): duplicate instance!");
+            if (!seq->next)
+                break;
+            seq = seq->next;
+        }
+
+        nb_inst_seq *next = (nb_inst_seq *) PyMem_Malloc(sizeof(nb_inst_seq));
+        if (NB_UNLIKELY(!next))
+            fail("nanobind::detail::inst_new(): list element allocation failed!");
+
+        next->inst = (PyObject *) self;
+        next->next = nullptr;
+        seq->next = next;
+    }
 
     return (PyObject *) self;
 }
 
 // Allocate a new instance with co-located storage
-PyObject *inst_new(PyTypeObject *type, PyObject *, PyObject *) {
+static PyObject *inst_new(PyTypeObject *type, PyObject *, PyObject *) {
     return inst_new_impl(type, nullptr);
 }
 
@@ -170,42 +197,70 @@ static void inst_dealloc(PyObject *self) {
             fail("nanobind::detail::inst_dealloc(\"%s\"): inconsistent "
                  "keep_alive information", t->name);
 
-        keep_alive_set ref_set = std::move(it.value());
+        nb_ptr_map ref_set = std::move(it.value());
         internals.keep_alive.erase(it);
 
-        for (keep_alive_entry e: ref_set) {
-            if (!e.deleter)
-                Py_DECREF((PyObject *) e.data);
+        for (auto [data, deleter]: ref_set) {
+            using Deleter = void (*) (void *) noexcept;
+
+            if (!deleter)
+                Py_DECREF((PyObject *) data);
             else
-                e.deleter(e.data);
+                ((Deleter) deleter)(data);
         }
     }
 
     // Update hash table that maps from C++ to Python instance
-    auto it = internals.inst_c2p.find(
-        std::pair<void *, std::type_index>(p, *t->type));
-    if (it == internals.inst_c2p.end())
+    nb_ptr_map &inst_c2p = internals.inst_c2p;
+    nb_ptr_map::iterator it = inst_c2p.find(p);
+    bool found = false;
+
+    if (NB_LIKELY(it != inst_c2p.end())) {
+        void *entry = it->second;
+        if (NB_LIKELY(entry == inst)) {
+            found = true;
+            inst_c2p.erase(it);
+        } else if (nb_is_seq(entry)) {
+            // Multiple objects are associated with this address. Find the right one!
+            nb_inst_seq *seq = nb_get_seq(entry),
+                        *pred = nullptr;
+
+            do {
+                if ((nb_inst *) seq->inst == inst) {
+                    found = true;
+
+                    if (pred) {
+                        pred->next = seq->next;
+                    } else {
+                        if (seq->next)
+                            it.value() = nb_mark_seq(seq->next);
+                        else
+                            inst_c2p.erase(it);
+                    }
+
+                    PyMem_Free(seq);
+                    break;
+                }
+
+                pred = seq;
+                seq = seq->next;
+            } while (seq);
+        }
+    }
+
+    if (NB_UNLIKELY(!found))
         fail("nanobind::detail::inst_dealloc(\"%s\"): attempted to delete "
              "an unknown instance (%p)!", t->name, p);
-    internals.inst_c2p.erase(it);
 
-    if (gc) {
-        #if defined(Py_LIMITED_API)
-            static freefunc tp_free =
-                (freefunc) PyType_GetSlot(tp, Py_tp_free);
-        #else
-            freefunc tp_free = tp->tp_free;
-        #endif
-
-        tp_free(self);
-    } else {
+    if (NB_UNLIKELY(gc))
+        NB_SLOT(internals, PyType_Type, tp_free)(self);
+    else
         PyObject_Free(self);
-    }
 
     Py_DECREF(tp);
 }
 
-void nb_type_dealloc(PyObject *o) {
+static void nb_type_dealloc(PyObject *o) {
     type_data *t = nb_type_data((PyTypeObject *) o);
 
     if (t->type && (t->flags & (uint32_t) type_flags::is_python_type) == 0) {
@@ -222,23 +277,13 @@ void nb_type_dealloc(PyObject *o) {
         free(t->implicit_py);
     }
 
-    if (t->flags & (uint32_t) type_flags::has_supplement)
-        free(t->supplement);
-
     free((char *) t->name);
 
-    #if defined(Py_LIMITED_API)
-        static destructor tp_dealloc =
-            (destructor) PyType_GetSlot(&PyType_Type, Py_tp_dealloc);
-    #else
-        destructor tp_dealloc = PyType_Type.tp_dealloc;
-    #endif
-
-    tp_dealloc(o);
+    NB_SLOT(internals_get(), PyType_Type, tp_dealloc)(o);
 }
 
 /// Called when a C++ type is extended from within Python
-int nb_type_init(PyObject *self, PyObject *args, PyObject *kwds) {
+static int nb_type_init(PyObject *self, PyObject *args, PyObject *kwds) {
     if (NB_TUPLE_GET_SIZE(args) != 3) {
         PyErr_SetString(PyExc_RuntimeError,
                         "nb_type_init(): invalid number of arguments!");
@@ -265,14 +310,7 @@ int nb_type_init(PyObject *self, PyObject *args, PyObject *kwds) {
         return -1;
     }
 
-    #if defined(Py_LIMITED_API)
-        static initproc tp_init =
-            (initproc) PyType_GetSlot(&PyType_Type, Py_tp_init);
-    #else
-        initproc tp_init = PyType_Type.tp_init;
-    #endif
-
-    int rv = tp_init(self, args, kwds);
+    int rv = NB_SLOT(internals_get(), PyType_Type, tp_init)(self, args, kwds);
     if (rv)
         return rv;
 
@@ -280,33 +318,339 @@ int nb_type_init(PyObject *self, PyObject *args, PyObject *kwds) {
 
     *t = *t_b;
     t->flags |=  (uint32_t) type_flags::is_python_type;
-    t->flags &= ~((uint32_t) type_flags::has_implicit_conversions |
-                  (uint32_t) type_flags::has_supplement);
+    t->flags &= ~((uint32_t) type_flags::has_implicit_conversions);
     PyObject *name = nb_type_name((PyTypeObject *) self);
     t->name = NB_STRDUP(PyUnicode_AsUTF8AndSize(name, nullptr));
     Py_DECREF(name);
     t->type_py = (PyTypeObject *) self;
-    t->base = t_b->type;
-    t->base_py = t_b->type_py;
     t->implicit = nullptr;
     t->implicit_py = nullptr;
-    t->supplement = nullptr;
 
     return 0;
 }
 
+/// Special case to handle 'Class.property = value' assignments
+static int nb_type_setattro(PyObject* obj, PyObject* name, PyObject* value) {
+    nb_internals &internals = internals_get();
+
+    internals.nb_static_property_enabled = false;
+    PyObject *cur = PyObject_GetAttr(obj, name);
+    internals.nb_static_property_enabled = true;
+
+    if (cur) {
+        PyTypeObject *tp = internals.nb_static_property;
+        if (Py_TYPE(cur) == tp) {
+            int rv = internals.nb_static_property_descr_set(cur, obj, value);
+            Py_DECREF(cur);
+            return rv;
+        }
+        Py_DECREF(cur);
+
+        const char *cname = PyUnicode_AsUTF8AndSize(name, nullptr);
+        if (!cname) {
+            PyErr_Clear(); // probably a non-string attribute name
+        } else if (cname[0] == '@') {
+            /* Prevent type attributes starting with an `@` sign from being
+               rebound or deleted. This is useful to safely stash owning
+               references. The ``nb::enum_<>`` class, e.g., uses this to ensure
+               indirect ownership of a borrowed reference in the supplemental
+               type data. */
+            PyErr_Format(PyExc_AttributeError,
+                         "internal nanobind attribute '%s' cannot be "
+                         "reassigned or deleted.", cname);
+            return -1;
+        }
+    } else {
+        PyErr_Clear();
+    }
+
+    return NB_SLOT(internals, PyType_Type, tp_setattro)(obj, name, value);
+}
+
+static PyObject *nb_type_from_metaclass(PyTypeObject *meta, PyObject *mod,
+                                        PyType_Spec *spec) {
+
+#if PY_VERSION_HEX >= 0x030C0000
+    // Life is good, PyType_FromMetaclass() is available
+    return PyType_FromMetaclass(meta, mod, spec, nullptr);
+#else
+    /* The fallback code below emulates PyType_FromMetaclass() on Python prior
+       to version 3.12. It requires access to CPython-internal structures, which
+       is why nanobind can only target the stable ABI on version 3.12+. */
+
+    const char *name = strrchr(spec->name, '.');
+    if (name)
+        name++;
+    else
+        name = spec->name;
+
+    PyObject *name_o = PyUnicode_FromString(name);
+    if (!name_o)
+        return nullptr;
+
+    const char *name_cstr = PyUnicode_AsUTF8AndSize(name_o, nullptr);
+    if (!name_cstr) {
+        Py_DECREF(name_o);
+        return nullptr;
+    }
+
+    PyHeapTypeObject *ht = (PyHeapTypeObject *) PyType_GenericAlloc(meta, 0);
+    if (!ht) {
+        Py_DECREF(name_o);
+        return nullptr;
+    }
+
+    ht->ht_name = name_o;
+    ht->ht_qualname = name_o;
+    Py_INCREF(name_o);
+
+#if PY_VERSION_HEX >= 0x03090000
+    if (mod) {
+        Py_INCREF(mod);
+        ht->ht_module = mod;
+    }
+#else
+    (void) mod;
+#endif
+
+    PyTypeObject *tp = &ht->ht_type;
+    PyMemberDef *members = nullptr;
+
+    tp->tp_name = name_cstr;
+    tp->tp_basicsize = spec->basicsize;
+    tp->tp_itemsize = spec->itemsize;
+    tp->tp_flags = spec->flags | Py_TPFLAGS_HEAPTYPE;
+
+    PyAsyncMethods    *am = tp->tp_as_async = &ht->as_async;
+    PyNumberMethods   *nb = tp->tp_as_number = &ht->as_number;
+    PySequenceMethods *sq = tp->tp_as_sequence = &ht->as_sequence;
+    PyMappingMethods  *mp = tp->tp_as_mapping = &ht->as_mapping;
+    PyBufferProcs     *bf = tp->tp_as_buffer = &ht->as_buffer;
+
+    #define CASE(tp, name) \
+        case Py_##tp##_##name: \
+            tp->tp##_##name = (decltype(tp->tp##_##name)) ts->pfunc; \
+            break;
+
+    for (PyType_Slot *ts = spec->slots; ts->slot != 0; ++ts) {
+        switch (ts->slot) {
+            CASE(tp, dealloc)
+            CASE(tp, getattr)
+            CASE(tp, setattr)
+            CASE(tp, repr)
+            CASE(tp, hash)
+            CASE(tp, call)
+            CASE(tp, str)
+            CASE(tp, getattro)
+            CASE(tp, setattro)
+            CASE(tp, traverse)
+            CASE(tp, clear)
+            CASE(tp, richcompare)
+            CASE(tp, iter)
+            CASE(tp, iternext)
+            CASE(tp, methods)
+            CASE(tp, getset)
+            CASE(tp, descr_get)
+            CASE(tp, descr_set)
+            CASE(tp, init)
+            CASE(tp, alloc)
+            CASE(tp, new)
+            CASE(tp, free)
+            CASE(tp, is_gc)
+            CASE(tp, del)
+            CASE(tp, finalize)
+
+            #if PY_VERSION_HEX < 0x03090000
+            #  define Py_bf_getbuffer 1
+            #  define Py_bf_releasebuffer 2
+            #endif
+
+            CASE(bf, getbuffer)
+            CASE(bf, releasebuffer)
+
+            CASE(mp, ass_subscript)
+            CASE(mp, length)
+            CASE(mp, subscript)
+
+            CASE(nb, absolute)
+            CASE(nb, add)
+            CASE(nb, and)
+            CASE(nb, bool)
+            CASE(nb, divmod)
+            CASE(nb, float)
+            CASE(nb, floor_divide)
+            CASE(nb, index)
+            CASE(nb, inplace_add)
+            CASE(nb, inplace_and)
+            CASE(nb, inplace_floor_divide)
+            CASE(nb, inplace_lshift)
+            CASE(nb, inplace_multiply)
+            CASE(nb, inplace_or)
+            CASE(nb, inplace_power)
+            CASE(nb, inplace_remainder)
+            CASE(nb, inplace_rshift)
+            CASE(nb, inplace_subtract)
+            CASE(nb, inplace_true_divide)
+            CASE(nb, inplace_xor)
+            CASE(nb, int)
+            CASE(nb, invert)
+            CASE(nb, lshift)
+            CASE(nb, multiply)
+            CASE(nb, negative)
+            CASE(nb, or)
+            CASE(nb, positive)
+            CASE(nb, power)
+            CASE(nb, remainder)
+            CASE(nb, rshift)
+            CASE(nb, subtract)
+            CASE(nb, true_divide)
+            CASE(nb, xor)
+            CASE(nb, matrix_multiply)
+            CASE(nb, inplace_matrix_multiply)
+
+            CASE(sq, ass_item)
+            CASE(sq, concat)
+            CASE(sq, contains)
+            CASE(sq, inplace_concat)
+            CASE(sq, inplace_repeat)
+            CASE(sq, item)
+            CASE(sq, length)
+            CASE(sq, repeat)
+
+            CASE(am, await)
+            CASE(am, aiter)
+            CASE(am, anext)
+#if PY_VERSION_HEX >= 0x030A0000
+            CASE(am, send)
+#endif
+            case Py_tp_doc:
+                if (ts->pfunc) {
+                    const char *source = (const char *) ts->pfunc;
+                    size_t size = strlen(source) + 1;
+                    char *target = (char *) PyObject_Malloc(size);
+                    if (!target) {
+                        Py_DECREF((PyObject *) tp);
+                        return PyErr_NoMemory();
+                    }
+                    memcpy(target, source, size);
+                    tp->tp_doc = target;
+                }
+                break;
+
+            case Py_tp_base:
+                if (ts->pfunc) {
+                    tp->tp_base = (PyTypeObject *) ts->pfunc;
+                    Py_INCREF(tp->tp_base);
+                }
+                break;
+
+            case Py_tp_members:
+                members = (PyMemberDef *) ts->pfunc;
+                break;
+
+            default:
+                Py_DECREF(tp);
+                return PyErr_Format(
+                    PyExc_RuntimeError,
+                    "nb_type_from_metaclass(): unhandled slot %i", ts->slot);
+        }
+    }
+
+    if (members) {
+        while (members->name) {
+            bool unhandled = false;
+
+            if (members->type == T_PYSSIZET && members->flags == READONLY) {
+                if (strcmp(members->name, "__dictoffset__") == 0)
+                    tp->tp_dictoffset = members->offset;
+                else if (strcmp(members->name, "__weaklistoffset__") == 0)
+                    tp->tp_weaklistoffset = members->offset;
+                else if (strcmp(members->name, "__vectorcalloffset__") == 0)
+                    tp->tp_vectorcall_offset = members->offset;
+                else
+                    unhandled = true;
+            } else {
+                unhandled = true;
+            }
+
+            if (unhandled) {
+                Py_DECREF(tp);
+                return PyErr_Format(
+                    PyExc_RuntimeError,
+                    "nb_type_from_metaclass(): unhandled tp_members entry!");
+            }
+
+            members++;
+        }
+    }
+
+    if (PyType_Ready(tp)) {
+        Py_DECREF(tp);
+        return nullptr;
+    }
+
+    return (PyObject *) tp;
+#endif
+}
+
+static PyTypeObject *nb_type_tp(nb_internals &internals,
+                                size_t supplement) noexcept {
+    object key = steal(PyLong_FromSize_t(supplement));
+
+    PyTypeObject *tp =
+        (PyTypeObject *) PyDict_GetItem(internals.nb_type_dict, key.ptr());
+
+    if (NB_UNLIKELY(!tp)) {
+        PyType_Slot slots[] = {
+            { Py_tp_base, &PyType_Type },
+            { Py_tp_dealloc, (void *) nb_type_dealloc },
+            { Py_tp_setattro, (void *) nb_type_setattro },
+            { Py_tp_init, (void *) nb_type_init },
+            { 0, nullptr }
+        };
+
+#if defined(Py_LIMITED_API)
+        int itemsize = cast<int>(handle(&PyType_Type).attr("__itemsize__"));
+        int basicsize = cast<int>(handle(&PyType_Type).attr("__basicsize__"));
+#else
+        int itemsize = (int) PyType_Type.tp_itemsize;
+        int basicsize = (int) PyType_Type.tp_basicsize;
+#endif
+        basicsize += (int) (sizeof(type_data) + supplement);
+
+        char name[17 + 20 + 1];
+        snprintf(name, sizeof(name), "nanobind.nb_type_%zu", supplement);
+
+        PyType_Spec spec = {
+            /* .name = */ name,
+            /* .basicsize = */ basicsize,
+            /* .itemsize = */ itemsize,
+            /* .flags = */ Py_TPFLAGS_DEFAULT,
+            /* .slots = */ slots
+        };
+
+        tp = (PyTypeObject *) nb_type_from_metaclass(
+            internals.nb_meta, internals.nb_module, &spec);
+
+        handle(tp).attr("__module__") = "nanobind";
+
+        if (!tp ||
+            PyDict_SetItem(internals.nb_type_dict, key.ptr(), (PyObject *) tp))
+            fail("nb_type type creation failed!");
+
+        Py_DECREF(tp);
+    }
+
+    return tp;
+}
+
 /// Called when a C++ type is bound via nb::class_<>
-PyObject *nb_type_new(const type_data *t) noexcept {
-    bool is_signed_enum    = t->flags & (uint32_t) type_flags::is_signed_enum,
-         is_unsigned_enum  = t->flags & (uint32_t) type_flags::is_unsigned_enum,
-         is_arithmetic     = t->flags & (uint32_t) type_flags::is_arithmetic,
-         is_enum           = is_signed_enum || is_unsigned_enum,
-         has_scope         = t->flags & (uint32_t) type_flags::has_scope,
-         has_doc           = t->flags & (uint32_t) type_flags::has_doc,
-         has_base          = t->flags & (uint32_t) type_flags::has_base,
-         has_base_py       = t->flags & (uint32_t) type_flags::has_base_py,
-         has_type_slots    = t->flags & (uint32_t) type_flags::has_type_slots,
-         has_supplement    = t->flags & (uint32_t) type_flags::has_supplement,
+PyObject *nb_type_new(const type_init_data *t) noexcept {
+    bool has_doc           = t->flags & (uint32_t) type_init_flags::has_doc,
+         has_base          = t->flags & (uint32_t) type_init_flags::has_base,
+         has_base_py       = t->flags & (uint32_t) type_init_flags::has_base_py,
+         has_type_slots    = t->flags & (uint32_t) type_init_flags::has_type_slots,
+         has_supplement    = t->flags & (uint32_t) type_init_flags::has_supplement,
          has_dynamic_attr  = t->flags & (uint32_t) type_flags::has_dynamic_attr,
          intrusive_ptr     = t->flags & (uint32_t) type_flags::intrusive_ptr;
 
@@ -315,21 +659,17 @@ PyObject *nb_type_new(const type_data *t) noexcept {
     object modname;
     PyObject *mod = nullptr;
 
-    if (has_scope) {
-        has_scope = t->scope != nullptr;
+    if (t->scope != nullptr) {
+        if (PyModule_Check(t->scope)) {
+            mod = t->scope;
+            modname = getattr(t->scope, "__name__", handle());
+        } else {
+            modname = getattr(t->scope, "__module__", handle());
 
-        if (has_scope) {
-            if (PyModule_Check(t->scope)) {
-                mod = t->scope;
-                modname = getattr(t->scope, "__name__", handle());
-            } else {
-                modname = getattr(t->scope, "__module__", handle());
-
-                object scope_qualname = getattr(t->scope, "__qualname__", handle());
-                if (scope_qualname.is_valid())
-                    qualname = steal<str>(
-                        PyUnicode_FromFormat("%U.%U", scope_qualname.ptr(), name.ptr()));
-            }
+            object scope_qualname = getattr(t->scope, "__qualname__", handle());
+            if (scope_qualname.is_valid())
+                qualname = steal<str>(
+                    PyUnicode_FromFormat("%U.%U", scope_qualname.ptr(), name.ptr()));
         }
     }
 
@@ -348,6 +688,9 @@ PyObject *nb_type_new(const type_data *t) noexcept {
             fail("nanobind::detail::nb_type_new(\"%s\"): multiple base types "
                  "specified!", t->name);
         base = (PyObject *) t->base_py;
+        if (!nb_type_check(base))
+            fail("nanobind::detail::nb_type_new(\"%s\"): base type is "
+                 "not a nanobind type!", t->name);
     } else if (has_base) {
         auto it = internals.type_c2p.find(std::type_index(*t->base));
         if (it == internals.type_c2p.end())
@@ -373,20 +716,19 @@ PyObject *nb_type_new(const type_data *t) noexcept {
     }
     char *name_copy = NB_STRDUP(name.c_str());
 
-    constexpr size_t nb_enum_max_slots = 22,
-                     nb_type_max_slots = 10,
+    constexpr size_t nb_type_max_slots = 10,
                      nb_extra_slots = 80,
-                     nb_total_slots = nb_enum_max_slots +
-                                      nb_type_max_slots +
+                     nb_total_slots = nb_type_max_slots +
                                       nb_extra_slots + 1;
 
     PyMemberDef members[2] { };
     PyType_Slot slots[nb_total_slots], *s = slots;
     PyType_Spec spec = {
-        .name = name_copy,
-        .basicsize = (int) basicsize,
-        .flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE,
-        .slots = slots
+        /* .name = */ name_copy,
+        /* .basicsize = */ (int) basicsize,
+        /* .itemsize = */ 0,
+        /* .flags = */ Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE,
+        /* .slots = */ slots
     };
 
     if (base)
@@ -400,17 +742,25 @@ PyObject *nb_type_new(const type_data *t) noexcept {
         *s++ = { Py_tp_doc, (void *) t->doc };
 
     if (has_type_slots) {
-        size_t i = 0;
-        while (t->type_slots[i].slot) {
-            if (i == nb_extra_slots)
-                fail("nanobind::detail::nb_type_new(\"%s\"): ran out of type "
-                     "slots!", t->name);
-            *s++ = t->type_slots[i++];
+        size_t num_avail = nb_extra_slots;
+        if (t->type_slots_callback) {
+            PyType_Slot* first_new = s;
+            t->type_slots_callback(t, s, num_avail);
+            if (first_new + num_avail < s)
+                fail("nanobind::detail::nb_type_new(\"%s\"): type_slots_callback "
+                     "overflowed the slots array!", t->name);
+            num_avail -= (s - first_new);
+        }
+        if (t->type_slots) {
+            size_t i = 0;
+            while (t->type_slots[i].slot) {
+                if (i == num_avail)
+                    fail("nanobind::detail::nb_type_new(\"%s\"): ran out of "
+                         "type slots!", t->name);
+                *s++ = t->type_slots[i++];
+            }
         }
     }
-
-    if (is_enum)
-        nb_enum_prepare(&s, is_arithmetic);
 
     bool has_traverse = false;
     for (PyType_Slot *ts = slots; ts != s; ++ts) {
@@ -439,150 +789,23 @@ PyObject *nb_type_new(const type_data *t) noexcept {
     }
 
     if (has_traverse && (!base || (PyType_GetFlags((PyTypeObject *) base) &
-                                   Py_TPFLAGS_HAVE_GC) == 0)) {
+                                   Py_TPFLAGS_HAVE_GC) == 0))
         spec.flags |= Py_TPFLAGS_HAVE_GC;
-    }
 
     *s++ = { 0, nullptr };
 
-    PyTypeObject *metaclass = is_enum ? internals.nb_enum
-                                      : internals.nb_type;
+    PyTypeObject *metaclass =
+        nb_type_tp(internals, has_supplement ? t->supplement : 0);
 
-#if PY_VERSION_HEX >= 0x030C0000
-    // Life is good, PyType_FromMetaclass() is available
-    PyObject *result = PyType_FromMetaclass(metaclass, mod, &spec, base);
-    if (!result)
-        fail("nanobind::detail::nb_type_new(\"%s\"): type construction failed!", t->name);
-#else
-    /* The fallback code below is cursed. It provides an alternative when
-       PyType_FromMetaclass() is not available we are furthermore *not*
-       targeting the stable ABI interface. It calls PyType_FromSpec() to create
-       a tentative type, copies its contents into a larger type with a
-       different metaclass, then lets the original type expire. */
-
-    (void) mod;
-
-    PyObject *temp = PyType_FromSpec(&spec);
-    PyHeapTypeObject *temp_ht = (PyHeapTypeObject *) temp;
-    PyTypeObject *temp_tp = &temp_ht->ht_type;
-
-    Py_INCREF (temp_ht->ht_name);
-    Py_INCREF (temp_ht->ht_qualname);
-    Py_XINCREF(temp_ht->ht_slots);
-    Py_INCREF (temp_tp->tp_base);
-
-#if PY_VERSION_HEX >= 0x03090000
-    Py_XINCREF(temp_ht->ht_module);
-#endif
-
-    char *tp_doc = nullptr;
-    if (temp_tp->tp_doc) {
-        size_t size = strlen(temp_tp->tp_doc) + 1;
-        tp_doc = (char *) PyObject_Malloc(size);
-        memcpy(tp_doc, temp_tp->tp_doc, size);
+    PyObject *result = nb_type_from_metaclass(metaclass, mod, &spec);
+    if (!result) {
+        python_error err;
+        fail("nanobind::detail::nb_type_new(\"%s\"): type construction failed: %s!", t->name, err.what());
     }
-
-    const char *tp_name = PyUnicode_AsUTF8AndSize(temp_ht->ht_name, nullptr);
-
-    PyObject *result = PyType_GenericAlloc(metaclass, Py_SIZE(temp_tp));
-    if (!temp || !result)
-        fail("nanobind::detail::nb_type_new(\"%s\"): type construction failed!",
-             t->name);
-
-    PyHeapTypeObject *ht = (PyHeapTypeObject *) result;
-    PyTypeObject *tp = &ht->ht_type;
-
-    ht->ht_name = temp_ht->ht_name;
-    ht->ht_qualname = temp_ht->ht_qualname;
-    ht->ht_slots = temp_ht->ht_slots;
-
-#if PY_VERSION_HEX >= 0x03090000
-    ht->ht_module = temp_ht->ht_module;
-#endif
-
-    tp->tp_name = tp_name;
-    tp->tp_doc = tp_doc;
-    tp->tp_flags = spec.flags | Py_TPFLAGS_HEAPTYPE;
-
-    if (temp_tp->tp_flags & Py_TPFLAGS_HAVE_GC)
-        tp->tp_flags |= Py_TPFLAGS_HAVE_GC;
-
-    /* The following fields remain intentionally null-initialized
-       following the call to PyType_GenericAlloc(): tp_dict, tp_bases, tp_mro,
-       tp_cache, tp_subclasses, tp_weaklist. */
-
-    #define COPY_FIELD(name) \
-        tp->name = temp_tp->name;
-
-    COPY_FIELD(tp_basicsize);
-    COPY_FIELD(tp_itemsize);
-    COPY_FIELD(tp_dealloc);
-    COPY_FIELD(tp_vectorcall_offset);
-    COPY_FIELD(tp_getattr);
-    COPY_FIELD(tp_setattr);
-    COPY_FIELD(tp_repr);
-    COPY_FIELD(tp_hash);
-    COPY_FIELD(tp_call);
-    COPY_FIELD(tp_str);
-    COPY_FIELD(tp_getattro);
-    COPY_FIELD(tp_setattro);
-    COPY_FIELD(tp_traverse);
-    COPY_FIELD(tp_clear);
-    COPY_FIELD(tp_richcompare);
-    COPY_FIELD(tp_weaklistoffset);
-    COPY_FIELD(tp_iter);
-    COPY_FIELD(tp_iternext);
-    COPY_FIELD(tp_methods);
-    COPY_FIELD(tp_getset);
-    COPY_FIELD(tp_base);
-    COPY_FIELD(tp_descr_get);
-    COPY_FIELD(tp_descr_set);
-    COPY_FIELD(tp_dictoffset);
-    COPY_FIELD(tp_init);
-    COPY_FIELD(tp_alloc);
-    COPY_FIELD(tp_new);
-    COPY_FIELD(tp_free);
-    COPY_FIELD(tp_is_gc);
-    COPY_FIELD(tp_del);
-    COPY_FIELD(tp_finalize);
-    COPY_FIELD(tp_vectorcall);
-
-    #undef COPY_FIELD
-
-    if (temp_tp->tp_members) {
-        tp->tp_members = (PyMemberDef*)((char *)tp + Py_TYPE(tp)->tp_basicsize);
-        std::memcpy(tp->tp_members, temp_tp->tp_members, tp->tp_itemsize * Py_SIZE(temp_tp));
-    }
-
-    ht->as_async = temp_ht->as_async;
-    tp->tp_as_async = &ht->as_async;
-
-    ht->as_number = temp_ht->as_number;
-    tp->tp_as_number = &ht->as_number;
-
-    ht->as_sequence = temp_ht->as_sequence;
-    tp->tp_as_sequence = &ht->as_sequence;
-
-    ht->as_mapping = temp_ht->as_mapping;
-    tp->tp_as_mapping = &ht->as_mapping;
-
-    ht->as_buffer = temp_ht->as_buffer;
-    tp->tp_as_buffer = &ht->as_buffer;
-
-#if PY_VERSION_HEX < 0x03090000
-    if (has_dynamic_attr)
-        tp->tp_dictoffset = (Py_ssize_t) (basicsize - ptr_size);
-#endif
-
-    PyType_Ready(tp);
-    Py_DECREF(temp);
-#endif
 
     type_data *to = nb_type_data((PyTypeObject *) result);
-    *to = *t;
-
-    if (!has_scope)
-        to->flags &= ~(uint32_t) type_flags::has_scope;
+    *to = *t; // note: slices off _init parts
+    to->flags &= ~(uint32_t) type_init_flags::all_init_flags;
 
     if (!intrusive_ptr && tb &&
         (tb->flags & (uint32_t) type_flags::intrusive_ptr)) {
@@ -593,22 +816,14 @@ PyObject *nb_type_new(const type_data *t) noexcept {
     to->name = name_copy;
     to->type_py = (PyTypeObject *) result;
 
-    if (has_supplement) {
-        if (!to->supplement)
-            fail("nanobind::detail::nb_type_new(\"%s\"): supplemental data "
-                 "allocation failed!", t->name);
-    } else {
-        to->supplement = nullptr;
-    }
-
     if (has_dynamic_attr) {
         to->flags |= (uint32_t) type_flags::has_dynamic_attr;
         #if defined(Py_LIMITED_API)
-            to->dictoffset = (Py_ssize_t) (basicsize - ptr_size);
+            to->dictoffset = (size_t) (basicsize - ptr_size);
         #endif
     }
 
-    if (has_scope)
+    if (t->scope != nullptr)
         setattr(t->scope, t->name, result);
 
     setattr(result, "__qualname__", qualname.ptr());
@@ -631,7 +846,7 @@ static NB_NOINLINE bool nb_type_get_implicit(PyObject *src,
                                              const std::type_info *cpp_type_src,
                                              const type_data *dst_type,
                                              nb_internals &internals,
-                                             cleanup_list *cleanup, void **out) {
+                                             cleanup_list *cleanup, void **out) noexcept {
     if (dst_type->implicit && cpp_type_src) {
         const std::type_info **it = dst_type->implicit;
         const std::type_info *v;
@@ -689,11 +904,25 @@ found:
     } else {
         PyErr_Clear();
 
-        PyObject *name = nb_inst_name(src);
-        PyErr_WarnFormat(PyExc_RuntimeWarning, 1,
-                         "nanobind: implicit conversion from type '%U' "
-                         "to type '%s' failed!", name, dst_type->name);
-        Py_DECREF(name);
+        if (internals.print_implicit_cast_warnings) {
+#if !defined(Py_LIMITED_API)
+            const char *name = Py_TYPE(src)->tp_name;
+#else
+            PyObject *name_py = nb_inst_name(src);
+            const char *name = PyUnicode_AsUTF8AndSize(name_py, nullptr);
+#endif
+            // Can't use PyErr_Warn*() if conversion failed due to a stack overflow
+            fprintf(stderr,
+                    "nanobind: implicit conversion from type '%s' to type '%s' "
+                    "failed!\n", name, dst_type->name);
+#if defined(_WIN32)
+            fflush(stderr);
+#endif
+
+#if defined(Py_LIMITED_API)
+            Py_DECREF(name_py);
+#endif
+        }
 
         return false;
     }
@@ -711,9 +940,7 @@ bool nb_type_get(const std::type_info *cpp_type, PyObject *src, uint8_t flags,
     nb_internals &internals = internals_get();
     PyTypeObject *src_type = Py_TYPE(src);
     const std::type_info *cpp_type_src = nullptr;
-    const PyTypeObject *metaclass = Py_TYPE((PyObject *) src_type);
-    const bool src_is_nb_type = metaclass == internals.nb_type ||
-                                metaclass == internals.nb_enum;
+    const bool src_is_nb_type = nb_type_check((PyObject *) src_type);
 
     type_data *dst_type = nullptr;
 
@@ -766,6 +993,7 @@ bool nb_type_get(const std::type_info *cpp_type, PyObject *src, uint8_t flags,
             return nb_type_get_implicit(src, cpp_type_src, dst_type, internals,
                                         cleanup, out);
     }
+
     return false;
 }
 
@@ -787,40 +1015,39 @@ static PyMethodDef keep_alive_callback_def = {
 };
 
 
-void keep_alive(PyObject *nurse, PyObject *patient) noexcept {
-    if (!patient || patient == Py_None)
+void keep_alive(PyObject *nurse, PyObject *patient) {
+    if (!patient || !nurse || nurse == Py_None || patient == Py_None)
         return;
-
-    if (!nurse)
-        fail("nanobind::detail::keep_alive(): the 'nurse' argument must be "
-             "provided!");
 
     nb_internals &internals = internals_get();
     PyTypeObject *metaclass = Py_TYPE((PyObject *) Py_TYPE(nurse));
 
-    if (metaclass == internals.nb_type || metaclass == internals.nb_enum) {
+    if (Py_TYPE((PyObject *) metaclass) == internals.nb_meta) {
         // Populate nanobind-internal data structures
-        keep_alive_set &keep_alive = internals.keep_alive[nurse];
+        nb_ptr_map &keep_alive = internals.keep_alive[nurse];
 
-        auto [it, success] = keep_alive.emplace(patient);
+        auto [it, success] = keep_alive.try_emplace(patient, nullptr);
         if (success) {
             Py_INCREF(patient);
             ((nb_inst *) nurse)->clear_keep_alive = true;
         } else {
-            if (it->deleter)
+            if (it->second)
                 fail("nanobind::detail::keep_alive(): internal error: entry "
                      "has a deletion callback!");
         }
     } else {
         PyObject *callback =
             PyCFunction_New(&keep_alive_callback_def, patient);
+        PyObject *weakref = PyWeakref_NewRef(nurse, callback);
+        if (!weakref) {
+            Py_DECREF(callback);
+            PyErr_Clear();
+            raise("nanobind::detail::keep_alive(): could not create a weak "
+                  "reference! Likely, the 'nurse' argument you specified is not "
+                  "a weak-referenceable type!");
+        }
         if (!callback)
             fail("nanobind::detail::keep_alive(): callback creation failed!");
-        PyObject *weakref = PyWeakref_NewRef(nurse, callback);
-        if (!weakref)
-            fail("nanobind::detail::keep_alive(): could not create a weak "
-                 "reference! Likely, the 'nurse' argument you specified is not "
-                 "a weak-referenceable type!");
 
         // Increase patient reference count, leak weak reference
         Py_INCREF(patient);
@@ -837,9 +1064,9 @@ void keep_alive(PyObject *nurse, void *payload,
 
     nb_internals &internals = internals_get();
 
-    if (metaclass == internals.nb_type || metaclass == internals.nb_enum) {
-        keep_alive_set &keep_alive = internals.keep_alive[nurse];
-        auto [it, success] = keep_alive.emplace(payload, callback);
+    if (Py_TYPE((PyObject *) metaclass) == internals.nb_meta) {
+        nb_ptr_map &keep_alive = internals.keep_alive[nurse];
+        auto [it, success] = keep_alive.try_emplace(payload, (void *) callback);
         if (!success)
             raise("keep_alive(): the given 'payload' pointer was already registered!");
         ((nb_inst *) nurse)->clear_keep_alive = true;
@@ -850,37 +1077,13 @@ void keep_alive(PyObject *nurse, void *payload,
     }
 }
 
-PyObject *nb_type_put(const std::type_info *cpp_type, void *value,
-                      rv_policy rvp, cleanup_list *cleanup,
-                      bool *is_new) noexcept {
-    // Convert nullptr -> None
-    if (!value) {
-        Py_INCREF(Py_None);
-        return Py_None;
-    }
-
-    // Check if the instance is already registered with nanobind
-    nb_internals &internals = internals_get();
-    auto it = internals.inst_c2p.find(
-        std::pair<void *, std::type_index>(value, *cpp_type));
-    if (it != internals.inst_c2p.end() && rvp != rv_policy::copy) {
-        PyObject *result = (PyObject *) it->second;
-        Py_INCREF(result);
-        return result;
-    } else if (rvp == rv_policy::none) {
-        return nullptr;
-    }
-
-    // Look up the corresponding type
-    auto it2 = internals.type_c2p.find(std::type_index(*cpp_type));
-    if (it2 == internals.type_c2p.end())
-        return nullptr;
-
+static PyObject *nb_type_put_common(void *value, type_data *t, rv_policy rvp,
+                                    cleanup_list *cleanup,
+                                    bool *is_new) noexcept {
     // The reference_internals RVP needs a self pointer, give up if unavailable
     if (rvp == rv_policy::reference_internal && (!cleanup || !cleanup->self()))
         return nullptr;
 
-    type_data *t = it2->second;
     const bool intrusive = t->flags & (uint32_t) type_flags::intrusive_ptr;
     if (intrusive)
         rvp = rv_policy::take_ownership;
@@ -951,15 +1154,178 @@ PyObject *nb_type_put(const std::type_info *cpp_type, void *value,
     return (PyObject *) inst;
 }
 
-PyObject *nb_type_put_unique(const std::type_info *cpp_type, void *value,
-                             cleanup_list *cleanup, bool cpp_delete) noexcept {
-    rv_policy policy = cpp_delete ? rv_policy::take_ownership : rv_policy::none;
+PyObject *nb_type_put(const std::type_info *cpp_type,
+                      void *value, rv_policy rvp,
+                      cleanup_list *cleanup,
+                      bool *is_new) noexcept {
+    // Convert nullptr -> None
+    if (!value) {
+        Py_INCREF(Py_None);
+        return Py_None;
+    }
 
-    bool is_new = false;
-    PyObject *o = nb_type_put(cpp_type, value, policy, cleanup, &is_new);
-    if (!o)
+    nb_internals &internals = internals_get();
+    nb_ptr_map &inst_c2p = internals.inst_c2p;
+    nb_type_map &type_map = internals.type_c2p;
+    type_data *td = nullptr;
+
+    auto lookup_type = [cpp_type, &td, &type_map]() -> bool {
+        if (!td) {
+            nb_type_map::iterator it =
+                type_map.find(std::type_index(*cpp_type));
+
+            if (it == type_map.end())
+                return false;
+
+            td = it->second;
+        }
+
+        return true;
+    };
+
+    if (rvp != rv_policy::copy) {
+        // Check if the instance is already registered with nanobind
+        nb_ptr_map::iterator it = inst_c2p.find(value);
+
+        if (it != inst_c2p.end()) {
+            void *entry = it->second;
+            nb_inst_seq seq;
+
+            if (NB_UNLIKELY(nb_is_seq(entry))) {
+                seq = *nb_get_seq(entry);
+            } else {
+                seq.inst = (PyObject *) entry;
+                seq.next = nullptr;
+            }
+
+            while (true) {
+                PyTypeObject *tp = Py_TYPE(seq.inst);
+
+                if (nb_type_data(tp)->type == cpp_type) {
+                    Py_INCREF(seq.inst);
+                    return seq.inst;
+                }
+
+                if (!lookup_type())
+                    return nullptr;
+
+                if (PyType_IsSubtype(tp, td->type_py)) {
+                    Py_INCREF(seq.inst);
+                    return seq.inst;
+                }
+
+                if (seq.next == nullptr)
+                    break;
+
+                seq = *seq.next;
+            }
+        } else if (rvp == rv_policy::none) {
+            return nullptr;
+        }
+    }
+
+    // Look up the corresponding Python type if not already done
+    if (!lookup_type())
         return nullptr;
 
+    return nb_type_put_common(value, td, rvp, cleanup, is_new);
+}
+
+PyObject *nb_type_put_p(const std::type_info *cpp_type,
+                        const std::type_info *cpp_type_p,
+                        void *value, rv_policy rvp,
+                        cleanup_list *cleanup,
+                        bool *is_new) noexcept {
+    // Convert nullptr -> None
+    if (!value) {
+        Py_INCREF(Py_None);
+        return Py_None;
+    }
+
+    // Check if the instance is already registered with nanobind
+    nb_internals &internals = internals_get();
+    nb_ptr_map &inst_c2p = internals.inst_c2p;
+    nb_type_map &type_map = internals.type_c2p;
+
+    // Look up the corresponding Python type
+    type_data *td = nullptr,
+              *td_p = nullptr;
+
+    auto lookup_type = [cpp_type, cpp_type_p, &td, &td_p, &type_map]() -> bool {
+        if (!td) {
+            nb_type_map::iterator it =
+                type_map.find(std::type_index(*cpp_type));
+
+            if (it == type_map.end())
+                return false;
+
+            td = it->second;
+
+            if (cpp_type_p && cpp_type_p != cpp_type) {
+                it = type_map.find(std::type_index(*cpp_type_p));
+
+                if (it != type_map.end())
+                    td_p = it->second;
+            }
+        }
+
+        return true;
+    };
+
+    if (rvp != rv_policy::copy) {
+        // Check if the instance is already registered with nanobind
+        nb_ptr_map::iterator it = inst_c2p.find(value);
+
+        if (it != inst_c2p.end()) {
+            void *entry = it->second;
+            nb_inst_seq seq;
+
+            if (NB_UNLIKELY(nb_is_seq(entry))) {
+                seq = *nb_get_seq(entry);
+            } else {
+                seq.inst = (PyObject *) entry;
+                seq.next = nullptr;
+            }
+
+            while (true) {
+                PyTypeObject *tp = Py_TYPE(seq.inst);
+
+                const std::type_info *p = nb_type_data(tp)->type;
+
+                if (p == cpp_type || p == cpp_type_p) {
+                    Py_INCREF(seq.inst);
+                    return seq.inst;
+                }
+
+                if (!lookup_type())
+                    return nullptr;
+
+                if (PyType_IsSubtype(tp, td->type_py) ||
+                    (td_p && PyType_IsSubtype(tp, td_p->type_py))) {
+                    Py_INCREF(seq.inst);
+                    return seq.inst;
+                }
+
+                if (seq.next == nullptr)
+                    break;
+
+                seq = *seq.next;
+            }
+        } else if (rvp == rv_policy::none) {
+            return nullptr;
+        }
+    }
+
+    // Look up the corresponding Python type if not already done
+    if (!lookup_type())
+        return nullptr;
+
+    return nb_type_put_common(value, td_p ? td_p : td, rvp, cleanup, is_new);
+}
+
+static void nb_type_put_unique_finalize(PyObject *o,
+                                        const std::type_info *cpp_type,
+                                        bool cpp_delete, bool is_new) {
     if (!cpp_delete && is_new)
         fail("nanobind::detail::nb_type_put_unique(type='%s', cpp_delete=%i): "
              "ownership status has become corrupted.",
@@ -983,6 +1349,35 @@ PyObject *nb_type_put_unique(const std::type_info *cpp_type, void *value,
                  "status has become corrupted.", type_name(cpp_type));
         inst->ready = true;
     }
+}
+
+PyObject *nb_type_put_unique(const std::type_info *cpp_type,
+                             void *value,
+                             cleanup_list *cleanup, bool cpp_delete) noexcept {
+    rv_policy policy = cpp_delete ? rv_policy::take_ownership : rv_policy::none;
+
+    bool is_new = false;
+    PyObject *o = nb_type_put(cpp_type, value, policy, cleanup, &is_new);
+
+    if (o)
+        nb_type_put_unique_finalize(o, cpp_type, cpp_delete, is_new);
+
+    return o;
+}
+
+PyObject *nb_type_put_unique_p(const std::type_info *cpp_type,
+                               const std::type_info *cpp_type_p,
+                               void *value,
+                               cleanup_list *cleanup, bool cpp_delete) noexcept {
+    rv_policy policy = cpp_delete ? rv_policy::take_ownership : rv_policy::none;
+
+    bool is_new = false;
+    PyObject *o =
+        nb_type_put_p(cpp_type, cpp_type_p, value, policy, cleanup, &is_new);
+
+    if (o)
+        nb_type_put_unique_finalize(o, cpp_type, cpp_delete, is_new);
+
     return o;
 }
 
@@ -1009,7 +1404,7 @@ void nb_type_relinquish_ownership(PyObject *o, bool cpp_delete) {
                 "this issue.", name);
 
             Py_DECREF(name);
-            raise_next_overload();
+            throw next_overload();
         }
 
         inst->cpp_delete = false;
@@ -1017,35 +1412,6 @@ void nb_type_relinquish_ownership(PyObject *o, bool cpp_delete) {
     }
 
     inst->ready = false;
-}
-
-/// Special case to handle 'Class.property = value' assignments
-int nb_type_setattro(PyObject* obj, PyObject* name, PyObject* value) {
-    nb_internals &internals = internals_get();
-
-    internals.nb_static_property_enabled = false;
-    PyObject *cur = PyObject_GetAttr(obj, name);
-    internals.nb_static_property_enabled = true;
-
-    if (cur) {
-        if (Py_TYPE(cur) == internals.nb_static_property) {
-            int rv = nb_static_property_set(cur, obj, value);
-            Py_DECREF(cur);
-            return rv;
-        }
-        Py_DECREF(cur);
-    } else {
-        PyErr_Clear();
-    }
-
-    #if defined(Py_LIMITED_API)
-        static setattrofunc tp_setattro =
-            (setattrofunc) PyType_GetSlot(&PyType_Type, Py_tp_setattro);
-    #else
-        setattrofunc tp_setattro = PyType_Type.tp_setattro;
-    #endif
-
-    return tp_setattro(obj, name, value);
 }
 
 bool nb_type_isinstance(PyObject *o, const std::type_info *t) noexcept {
@@ -1064,12 +1430,16 @@ PyObject *nb_type_lookup(const std::type_info *t) noexcept {
     return nullptr;
 }
 
-bool nb_type_check(PyObject *t) noexcept {
-    nb_internals &internals = internals_get();
-    PyTypeObject *metaclass = Py_TYPE(t);
+static PyTypeObject *nb_meta_cache = nullptr;
 
-    return metaclass == internals.nb_type ||
-           metaclass == internals.nb_enum;
+bool nb_type_check(PyObject *t) noexcept {
+    if (NB_UNLIKELY(!nb_meta_cache))
+        nb_meta_cache = internals_get().nb_meta;
+
+    PyTypeObject *meta  = Py_TYPE(t),
+                 *meta2 = Py_TYPE((PyObject *) meta);
+
+    return meta2 == nb_meta_cache;
 }
 
 size_t nb_type_size(PyObject *t) noexcept {
@@ -1085,7 +1455,7 @@ const std::type_info *nb_type_info(PyObject *t) noexcept {
 }
 
 void *nb_type_supplement(PyObject *t) noexcept {
-    return nb_type_data((PyTypeObject *) t)->supplement;
+    return nb_type_data((PyTypeObject *) t) + 1;
 }
 
 PyObject *nb_inst_alloc(PyTypeObject *t) {
@@ -1210,6 +1580,10 @@ PyObject *nb_type_name(PyTypeObject *tp) noexcept {
     return name;
 }
 
+bool nb_inst_python_derived(PyObject *o) noexcept {
+    return nb_type_data(Py_TYPE(o))->flags &
+           (uint32_t) type_flags::is_python_type;
+}
 
 NAMESPACE_END(detail)
 NAMESPACE_END(NB_NAMESPACE)

@@ -13,14 +13,12 @@
 NAMESPACE_BEGIN(NB_NAMESPACE)
 NAMESPACE_BEGIN(detail)
 
-void trampoline_new(void **data, size_t size, void *ptr,
-                    const std::type_info *cpp_type) noexcept {
+void trampoline_new(void **data, size_t size, void *ptr) noexcept {
     // GIL is held when the trampoline constructor runs
-    nb_internals &internals = internals_get();
-    auto it = internals.inst_c2p.find(
-        std::pair<void *, std::type_index>(ptr, *cpp_type));
-    if (it == internals.inst_c2p.end())
-        fail("nanobind::detail::trampoline_new(): instance not found!");
+    nb_ptr_map &inst_c2p = internals_get().inst_c2p;
+    nb_ptr_map::iterator it = inst_c2p.find(ptr);
+    if (it == inst_c2p.end() || (((uintptr_t) it->second) & 1))
+        fail("nanobind::detail::trampoline_new(): unique instance not found!");
 
     data[0] = it->second;
     memset(data + 1, 0, sizeof(void *) * 2 * size);
@@ -37,8 +35,12 @@ PyObject *trampoline_lookup(void **data, size_t size, const char *name,
     const PyObject *None = Py_None;
 
     current_method cm = current_method_data;
-    if (cm.self == data[0] && (cm.name == name || strcmp(cm.name, name) == 0))
+    if (cm.self == data[0] && (cm.name == name || strcmp(cm.name, name) == 0)) {
+        if (pure)
+            raise("nanobind::detail::get_trampoline('%s()'): tried to call a "
+                  "pure virtual function!", name);
         return nullptr;
+    }
 
     // First quick sweep without lock
     for (size_t i = 0; i < size; i++) {

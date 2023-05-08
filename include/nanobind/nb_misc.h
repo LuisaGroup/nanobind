@@ -13,6 +13,8 @@ struct gil_scoped_acquire {
 public:
     gil_scoped_acquire() noexcept : state(PyGILState_Ensure()) { }
     ~gil_scoped_acquire() { PyGILState_Release(state); }
+    gil_scoped_acquire(const gil_scoped_acquire &) = delete;
+    gil_scoped_acquire& operator=(const gil_scoped_acquire &) = delete;
 
 private:
     const PyGILState_STATE state;
@@ -22,36 +24,19 @@ class gil_scoped_release {
 public:
     gil_scoped_release() noexcept : state(PyEval_SaveThread()) { }
     ~gil_scoped_release() { PyEval_RestoreThread(state); }
+    gil_scoped_release(const gil_scoped_release &) = delete;
+    gil_scoped_release& operator=(const gil_scoped_release &) = delete;
 
 private:
     PyThreadState *state;
 };
 
-// Deleter for std::unique_ptr<T> (handles ownership by both C++ and Python)
-template <typename T> struct deleter {
-    /// Instance should be cleared using a delete expression
-    deleter()  = default;
+inline void set_leak_warnings(bool value) noexcept {
+    detail::set_leak_warnings(value);
+}
 
-    /// Instance owned by Python, reduce reference count upon deletion
-    deleter(handle h) : o(h.ptr()) { }
-
-    /// Does Python own storage of the underlying object
-    bool owned_by_python() const { return o != nullptr; }
-
-    /// Does C++ own storage of the underlying object
-    bool owned_by_cpp() const { return o == nullptr; }
-
-    /// Perform the requested deletion operation
-    void operator()(void *p) noexcept {
-        if (o) {
-            gil_scoped_acquire guard;
-            Py_DECREF(o);
-        } else {
-            delete (T *) p;
-        }
-    }
-
-    PyObject *o{nullptr};
-};
+inline void set_implicit_cast_warnings(bool value) noexcept {
+    detail::set_implicit_cast_warnings(value);
+}
 
 NAMESPACE_END(NB_NAMESPACE)

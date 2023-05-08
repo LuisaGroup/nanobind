@@ -27,38 +27,57 @@ public:                                                                        \
     NB_INLINE Type() : Parent() {}
 
 /// Helper macro to create detail::api comparison functions
-#define NB_API_COMP(name, op)                                                  \
-    template <typename T> NB_INLINE bool name(const api<T> &o) const {         \
+#define NB_DECL_COMP(name)                                                     \
+    template <typename T2> NB_INLINE bool name(const api<T2> &o) const;
+
+#define NB_IMPL_COMP(name, op)                                                 \
+    template <typename T1> template <typename T2>                              \
+    NB_INLINE bool api<T1>::name(const api<T2> &o) const {                     \
         return detail::obj_comp(derived().ptr(), o.derived().ptr(), op);       \
     }
 
-/// Helper macro to create detail::api unary operators
-#define NB_API_OP_1(name, op)                                                  \
-    NB_INLINE auto name() const {                                              \
+/// Helper macros to create detail::api unary operators
+#define NB_DECL_OP_1(name)                                                     \
+    NB_INLINE object name() const;
+
+#define NB_IMPL_OP_1(name, op)                                                 \
+    template <typename T> NB_INLINE object api<T>::name() const {              \
         return steal(detail::obj_op_1(derived().ptr(), op));                   \
     }
 
-/// Helper macro to create detail::api binary operators
-#define NB_API_OP_2(name, op)                                                  \
-    template <typename T> NB_INLINE auto name(const api<T> &o) const {         \
+/// Helper macros to create detail::api binary operators
+#define NB_DECL_OP_2(name)                                                     \
+    template <typename T2> NB_INLINE object name(const api<T2> &o) const;
+
+#define NB_IMPL_OP_2(name, op)                                                 \
+    template <typename T1> template <typename T2>                              \
+    NB_INLINE object api<T1>::name(const api<T2> &o) const {                   \
         return steal(                                                          \
             detail::obj_op_2(derived().ptr(), o.derived().ptr(), op));         \
     }
 
-#define NB_API_OP_2_I(name, op)                                                \
-    template <typename T> NB_INLINE auto name(const api<T> &o) {               \
+#define NB_DECL_OP_2_I(name)                                                   \
+    template <typename T2> NB_INLINE object name(const api<T2> &o);
+
+#define NB_IMPL_OP_2_I(name, op)                                               \
+    template <typename T1> template <typename T2>                              \
+    NB_INLINE object api<T1>::name(const api<T2> &o) {                         \
         return steal(                                                          \
             detail::obj_op_2(derived().ptr(), o.derived().ptr(), op));         \
     }
 
+#define NB_IMPL_OP_2_IO(name)                                                  \
+    template <typename T> NB_INLINE decltype(auto) name(const api<T> &o) {     \
+        return operator=(handle::name(o));                                     \
+    }
 
 // A few forward declarations
 class object;
 class handle;
 class iterator;
 
-template <typename T = object> T borrow(handle h);
-template <typename T = object> T steal(handle h);
+template <typename T = object> NB_INLINE T borrow(handle h);
+template <typename T = object> NB_INLINE T steal(handle h);
 
 NAMESPACE_BEGIN(detail)
 
@@ -96,6 +115,7 @@ public:
 
     accessor<obj_attr> attr(handle key) const;
     accessor<str_attr> attr(const char *key) const;
+    accessor<str_attr> doc() const;
 
     accessor<obj_item> operator[](handle key) const;
     accessor<str_item> operator[](const char *key) const;
@@ -107,33 +127,33 @@ public:
               typename... Args>
     object operator()(Args &&...args) const;
 
-    NB_API_COMP(equal,      Py_EQ)
-    NB_API_COMP(not_equal,  Py_NE)
-    NB_API_COMP(operator<,  Py_LT)
-    NB_API_COMP(operator<=, Py_LE)
-    NB_API_COMP(operator>,  Py_GT)
-    NB_API_COMP(operator>=, Py_GE)
-    NB_API_OP_1(operator-,  PyNumber_Negative)
-    NB_API_OP_1(operator!,  PyNumber_Invert)
-    NB_API_OP_2(operator+,  PyNumber_Add)
-    NB_API_OP_2(operator-,  PyNumber_Subtract)
-    NB_API_OP_2(operator*,  PyNumber_Multiply)
-    NB_API_OP_2(operator/,  PyNumber_TrueDivide)
-    NB_API_OP_2(operator|,  PyNumber_Or)
-    NB_API_OP_2(operator&,  PyNumber_And)
-    NB_API_OP_2(operator^,  PyNumber_Xor)
-    NB_API_OP_2(operator<<, PyNumber_Lshift)
-    NB_API_OP_2(operator>>, PyNumber_Rshift)
-    NB_API_OP_2(floor_div,  PyNumber_FloorDivide)
-    NB_API_OP_2_I(operator+=, PyNumber_InPlaceAdd)
-    NB_API_OP_2_I(operator-=, PyNumber_InPlaceSubtract)
-    NB_API_OP_2_I(operator*=, PyNumber_InPlaceMultiply)
-    NB_API_OP_2_I(operator/=, PyNumber_InPlaceTrueDivide)
-    NB_API_OP_2_I(operator|=, PyNumber_InPlaceOr)
-    NB_API_OP_2_I(operator&=, PyNumber_InPlaceAnd)
-    NB_API_OP_2_I(operator^=, PyNumber_InPlaceXor)
-    NB_API_OP_2_I(operator<<=,PyNumber_InPlaceLshift)
-    NB_API_OP_2_I(operator>>=,PyNumber_InPlaceRshift)
+    NB_DECL_COMP(equal)
+    NB_DECL_COMP(not_equal)
+    NB_DECL_COMP(operator<)
+    NB_DECL_COMP(operator<=)
+    NB_DECL_COMP(operator>)
+    NB_DECL_COMP(operator>=)
+    NB_DECL_OP_1(operator-)
+    NB_DECL_OP_1(operator~)
+    NB_DECL_OP_2(operator+)
+    NB_DECL_OP_2(operator-)
+    NB_DECL_OP_2(operator*)
+    NB_DECL_OP_2(operator/)
+    NB_DECL_OP_2(operator|)
+    NB_DECL_OP_2(operator&)
+    NB_DECL_OP_2(operator^)
+    NB_DECL_OP_2(operator<<)
+    NB_DECL_OP_2(operator>>)
+    NB_DECL_OP_2(floor_div)
+    NB_DECL_OP_2_I(operator+=)
+    NB_DECL_OP_2_I(operator-=)
+    NB_DECL_OP_2_I(operator*=)
+    NB_DECL_OP_2_I(operator/=)
+    NB_DECL_OP_2_I(operator|=)
+    NB_DECL_OP_2_I(operator&=)
+    NB_DECL_OP_2_I(operator^=)
+    NB_DECL_OP_2_I(operator<<=)
+    NB_DECL_OP_2_I(operator>>=)
 };
 
 NAMESPACE_END(detail)
@@ -157,7 +177,7 @@ public:
     NB_INLINE handle(const PyTypeObject *ptr) : m_ptr((PyObject *) ptr) { }
 
     const handle& inc_ref() const & noexcept {
-#if defined(NDEBUG)
+#if defined(NDEBUG) && !defined(Py_LIMITED_API)
         Py_XINCREF(m_ptr);
 #else
         detail::incref_checked(m_ptr);
@@ -166,7 +186,7 @@ public:
     }
 
     const handle& dec_ref() const & noexcept {
-#if defined(NDEBUG)
+#if defined(NDEBUG) && !defined(Py_LIMITED_API)
         Py_XDECREF(m_ptr);
 #else
         detail::decref_checked(m_ptr);
@@ -174,7 +194,7 @@ public:
         return *this;
     }
 
-    NB_INLINE operator bool() const { return m_ptr != nullptr; }
+    NB_INLINE explicit operator bool() const { return m_ptr != nullptr; }
     NB_INLINE PyObject *ptr() const { return m_ptr; }
     NB_INLINE static bool check_(handle) { return true; }
 
@@ -199,7 +219,7 @@ public:
       return temp;
     }
 
-    void clear() {
+    void reset() {
         dec_ref();
         m_ptr = nullptr;
     }
@@ -219,6 +239,16 @@ public:
         temp.dec_ref();
         return *this;
     }
+
+    NB_IMPL_OP_2_IO(operator+=)
+    NB_IMPL_OP_2_IO(operator-=)
+    NB_IMPL_OP_2_IO(operator*=)
+    NB_IMPL_OP_2_IO(operator/=)
+    NB_IMPL_OP_2_IO(operator|=)
+    NB_IMPL_OP_2_IO(operator&=)
+    NB_IMPL_OP_2_IO(operator^=)
+    NB_IMPL_OP_2_IO(operator<<=)
+    NB_IMPL_OP_2_IO(operator>>=)
 };
 
 template <typename T> NB_INLINE T borrow(handle h) {
@@ -229,36 +259,44 @@ template <typename T> NB_INLINE T steal(handle h) {
     return { h, detail::steal_t() };
 }
 
-inline bool hasattr(handle obj, const char *key) noexcept {
-    return PyObject_HasAttrString(obj.ptr(), key);
+inline bool hasattr(handle h, const char *key) noexcept {
+    return PyObject_HasAttrString(h.ptr(), key);
 }
 
-inline bool hasattr(handle obj, handle key) noexcept {
-    return PyObject_HasAttr(obj.ptr(), key.ptr());
+inline bool hasattr(handle h, handle key) noexcept {
+    return PyObject_HasAttr(h.ptr(), key.ptr());
 }
 
-inline object getattr(handle obj, const char *key) {
-    return steal(detail::getattr(obj.ptr(), key));
+inline object getattr(handle h, const char *key) {
+    return steal(detail::getattr(h.ptr(), key));
 }
 
-inline object getattr(handle obj, handle key) {
-    return steal(detail::getattr(obj.ptr(), key.ptr()));
+inline object getattr(handle h, handle key) {
+    return steal(detail::getattr(h.ptr(), key.ptr()));
 }
 
-inline object getattr(handle obj, const char *key, handle def) noexcept {
-    return steal(detail::getattr(obj.ptr(), key, def.ptr()));
+inline object getattr(handle h, const char *key, handle def) noexcept {
+    return steal(detail::getattr(h.ptr(), key, def.ptr()));
 }
 
-inline object getattr(handle obj, handle key, handle value) noexcept {
-    return steal(detail::getattr(obj.ptr(), key.ptr(), value.ptr()));
+inline object getattr(handle h, handle key, handle value) noexcept {
+    return steal(detail::getattr(h.ptr(), key.ptr(), value.ptr()));
 }
 
-inline void setattr(handle obj, const char *key, handle value) {
-    detail::setattr(obj.ptr(), key, value.ptr());
+inline void setattr(handle h, const char *key, handle value) {
+    detail::setattr(h.ptr(), key, value.ptr());
 }
 
-inline void setattr(handle obj, handle key, handle value) {
-    detail::setattr(obj.ptr(), key.ptr(), value.ptr());
+inline void setattr(handle h, handle key, handle value) {
+    detail::setattr(h.ptr(), key.ptr(), value.ptr());
+}
+
+inline void delattr(handle h, const char *key) {
+    detail::delattr(h.ptr(), key);
+}
+
+inline void delattr(handle h, handle key) {
+    detail::delattr(h.ptr(), key.ptr());
 }
 
 class module_ : public object {
@@ -283,16 +321,18 @@ public:
 class capsule : public object {
     NB_OBJECT_DEFAULT(capsule, object, "capsule", PyCapsule_CheckExact)
 
-    capsule(const void *ptr, void (*free)(void *) noexcept = nullptr) {
-        m_ptr = detail::capsule_new(ptr, nullptr, free);
+    capsule(const void *ptr, void (*cleanup)(void *) noexcept = nullptr) {
+        m_ptr = detail::capsule_new(ptr, nullptr, cleanup);
     }
 
     capsule(const void *ptr, const char *name,
-            void (*free)(void *) noexcept = nullptr) {
-        m_ptr = detail::capsule_new(ptr, name, free);
+            void (*cleanup)(void *) noexcept = nullptr) {
+        m_ptr = detail::capsule_new(ptr, name, cleanup);
     }
 
-    void *data() const { return PyCapsule_GetPointer(m_ptr, nullptr); }
+    const char *name() const { return PyCapsule_GetName(m_ptr); }
+
+    void *data() const { return PyCapsule_GetPointer(m_ptr, name()); }
 };
 
 class int_ : public object {
@@ -325,11 +365,13 @@ class str : public object {
     explicit str(handle h)
         : object(detail::str_from_obj(h.ptr()), detail::steal_t{}) { }
 
-    explicit str(const char *c)
-        : object(detail::str_from_cstr(c), detail::steal_t{}) { }
+    explicit str(const char *s)
+        : object(detail::str_from_cstr(s), detail::steal_t{}) { }
 
-    explicit str(const char *c, size_t n)
-        : object(detail::str_from_cstr_and_size(c, n), detail::steal_t{}) { }
+    explicit str(const char *s, size_t n)
+        : object(detail::str_from_cstr_and_size(s, n), detail::steal_t{}) { }
+
+    template <typename... Args> str format(Args&&... args);
 
     const char *c_str() { return PyUnicode_AsUTF8AndSize(m_ptr, nullptr); }
 };
@@ -340,20 +382,20 @@ class bytes : public object {
     explicit bytes(handle h)
         : object(detail::bytes_from_obj(h.ptr()), detail::steal_t{}) { }
 
-    explicit bytes(const char *c)
-        : object(detail::bytes_from_cstr(c), detail::steal_t{}) { }
+    explicit bytes(const char *s)
+        : object(detail::bytes_from_cstr(s), detail::steal_t{}) { }
 
-    explicit bytes(const char *c, size_t n)
-        : object(detail::bytes_from_cstr_and_size(c, n), detail::steal_t{}) { }
+    explicit bytes(const char *s, size_t n)
+        : object(detail::bytes_from_cstr_and_size(s, n), detail::steal_t{}) { }
 
     const char *c_str() { return PyBytes_AsString(m_ptr); }
 
-    size_t size() const { return PyBytes_Size(m_ptr); }
+    size_t size() const { return (size_t) PyBytes_Size(m_ptr); }
 };
 
 class tuple : public object {
     NB_OBJECT_DEFAULT(tuple, object, "tuple", PyTuple_Check)
-    size_t size() const { return NB_TUPLE_GET_SIZE(m_ptr); }
+    size_t size() const { return (size_t) NB_TUPLE_GET_SIZE(m_ptr); }
     template <typename T, detail::enable_if_t<std::is_arithmetic_v<T>> = 1>
     detail::accessor<detail::num_item_tuple> operator[](T key) const;
 
@@ -370,7 +412,7 @@ class type_object : public object {
 class list : public object {
     NB_OBJECT(list, object, "list", PyList_Check)
     list() : object(PyList_New(0), detail::steal_t()) { }
-    size_t size() const { return NB_LIST_GET_SIZE(m_ptr); }
+    size_t size() const { return (size_t) NB_LIST_GET_SIZE(m_ptr); }
 
     template <typename T> void append(T &&value);
 
@@ -386,7 +428,7 @@ class list : public object {
 class dict : public object {
     NB_OBJECT(dict, object, "dict", PyDict_Check)
     dict() : object(PyDict_New(), detail::steal_t()) { }
-    size_t size() const { return NB_DICT_GET_SIZE(m_ptr); }
+    size_t size() const { return (size_t) NB_DICT_GET_SIZE(m_ptr); }
     detail::dict_iterator begin() const;
     detail::dict_iterator end() const;
     list keys() const { return steal<list>(detail::obj_op_1(m_ptr, PyDict_Keys)); }
@@ -450,19 +492,32 @@ private:
     mutable object m_value;
 };
 
+class iterable : public object {
+public:
+    NB_OBJECT_DEFAULT(iterable, object, "Iterable", detail::iterable_check)
+};
+
+/// Retrieve the Python type object associated with a C++ class
+template <typename T> handle type() noexcept {
+    return detail::nb_type_lookup(&typeid(detail::intrinsic_t<T>));
+}
+
 template <typename T>
-NB_INLINE bool isinstance(handle obj) noexcept {
+NB_INLINE bool isinstance(handle h) noexcept {
     if constexpr (std::is_base_of_v<handle, T>)
-        return T::check_(obj);
+        return T::check_(h);
+    else if constexpr (detail::make_caster<T>::IsClass)
+        return detail::nb_type_isinstance(h.ptr(), &typeid(detail::intrinsic_t<T>));
     else
-        return detail::nb_type_isinstance(obj.ptr(), &typeid(detail::intrinsic_t<T>));
+        return detail::make_caster<T>().from_python(h, 0, nullptr);
 }
 
 NB_INLINE str repr(handle h) { return steal<str>(detail::obj_repr(h.ptr())); }
 NB_INLINE size_t len(handle h) { return detail::obj_len(h.ptr()); }
-NB_INLINE size_t len(const tuple &t) { return NB_TUPLE_GET_SIZE(t.ptr()); }
-NB_INLINE size_t len(const list &t) { return NB_LIST_GET_SIZE(t.ptr()); }
-NB_INLINE size_t len(const dict &t) { return NB_DICT_GET_SIZE(t.ptr()); }
+NB_INLINE size_t len_hint(handle h) { return detail::obj_len_hint(h.ptr()); }
+NB_INLINE size_t len(const tuple &t) { return (size_t) NB_TUPLE_GET_SIZE(t.ptr()); }
+NB_INLINE size_t len(const list &l) { return (size_t) NB_LIST_GET_SIZE(l.ptr()); }
+NB_INLINE size_t len(const dict &d) { return (size_t) NB_DICT_GET_SIZE(d.ptr()); }
 
 inline void print(handle value, handle end = handle(), handle file = handle()) {
     detail::print(value.ptr(), end.ptr(), file.ptr());
@@ -470,11 +525,6 @@ inline void print(handle value, handle end = handle(), handle file = handle()) {
 
 inline void print(const char *str, handle end = handle(), handle file = handle()) {
     print(nanobind::str(str), end, file);
-}
-
-/// Retrieve the Python type object associated with a C++ class
-template <typename T> handle type() {
-    return detail::nb_type_lookup(&typeid(detail::intrinsic_t<T>));
 }
 
 inline object none() { return borrow(Py_None); }
@@ -499,6 +549,13 @@ public:
     slice(T start, T stop) : slice(int_(start), int_(stop), Py_None) {}
     template <typename T, detail::enable_if_t<std::is_arithmetic_v<T>> = 0>
     slice(T start, T stop, T step) : slice(int_(start), int_(stop), int_(step)) {}
+
+    detail::tuple<Py_ssize_t, Py_ssize_t, Py_ssize_t, size_t> compute(size_t size) const {
+        Py_ssize_t start, stop, step;
+        size_t slice_length;
+        detail::slice_compute(m_ptr, (Py_ssize_t) size, start, stop, step, slice_length);
+        return detail::tuple(start, stop, step, slice_length);
+    }
 };
 
 class ellipsis : public object {
@@ -542,6 +599,12 @@ public:
     }
 };
 
+template <typename T, typename X> struct typed { T value; };
+
+template <typename T> struct pointer_and_handle {
+    T *p;
+    handle h;
+};
 
 NAMESPACE_BEGIN(detail)
 template <typename Derived> NB_INLINE api<Derived>::operator handle() const {
@@ -573,7 +636,9 @@ template <typename Derived> iterator api<Derived>::end() const {
 struct fast_iterator {
     using value_type = handle;
     using reference = const value_type;
+    using difference_type = std::ptrdiff_t;
 
+    fast_iterator() = default;
     fast_iterator(PyObject **value) : value(value) { }
 
     fast_iterator& operator++() { value++; return *this; }
@@ -591,9 +656,9 @@ public:
     using value_type = std::pair<handle, handle>;
     using reference = const value_type;
 
-    dict_iterator() : obj(handle()), pos(-1) { }
+    dict_iterator() : h(), pos(-1) { }
 
-    dict_iterator(handle obj) : obj(obj), pos(0) {
+    dict_iterator(handle h) : h(h), pos(0) {
         increment();
     }
 
@@ -609,7 +674,7 @@ public:
     }
 
     void increment() {
-        if (PyDict_Next(obj.ptr(), &pos, &key, &value) == 0)
+        if (PyDict_Next(h.ptr(), &pos, &key, &value) == 0)
             pos = -1;
     }
 
@@ -619,11 +684,48 @@ public:
     friend bool operator!=(const dict_iterator &a, const dict_iterator &b) { return a.pos != b.pos; }
 
 private:
-    handle obj;
+    handle h;
     Py_ssize_t pos;
     PyObject *key = nullptr, *value = nullptr;
 };
 
+NB_IMPL_COMP(equal,      Py_EQ)
+NB_IMPL_COMP(not_equal,  Py_NE)
+NB_IMPL_COMP(operator<,  Py_LT)
+NB_IMPL_COMP(operator<=, Py_LE)
+NB_IMPL_COMP(operator>,  Py_GT)
+NB_IMPL_COMP(operator>=, Py_GE)
+NB_IMPL_OP_1(operator-,  PyNumber_Negative)
+NB_IMPL_OP_1(operator~,  PyNumber_Invert)
+NB_IMPL_OP_2(operator+,  PyNumber_Add)
+NB_IMPL_OP_2(operator-,  PyNumber_Subtract)
+NB_IMPL_OP_2(operator*,  PyNumber_Multiply)
+NB_IMPL_OP_2(operator/,  PyNumber_TrueDivide)
+NB_IMPL_OP_2(operator|,  PyNumber_Or)
+NB_IMPL_OP_2(operator&,  PyNumber_And)
+NB_IMPL_OP_2(operator^,  PyNumber_Xor)
+NB_IMPL_OP_2(operator<<, PyNumber_Lshift)
+NB_IMPL_OP_2(operator>>, PyNumber_Rshift)
+NB_IMPL_OP_2(floor_div,  PyNumber_FloorDivide)
+NB_IMPL_OP_2_I(operator+=, PyNumber_InPlaceAdd)
+NB_IMPL_OP_2_I(operator-=, PyNumber_InPlaceSubtract)
+NB_IMPL_OP_2_I(operator*=, PyNumber_InPlaceMultiply)
+NB_IMPL_OP_2_I(operator/=, PyNumber_InPlaceTrueDivide)
+NB_IMPL_OP_2_I(operator|=, PyNumber_InPlaceOr)
+NB_IMPL_OP_2_I(operator&=, PyNumber_InPlaceAnd)
+NB_IMPL_OP_2_I(operator^=, PyNumber_InPlaceXor)
+NB_IMPL_OP_2_I(operator<<=,PyNumber_InPlaceLshift)
+NB_IMPL_OP_2_I(operator>>=,PyNumber_InPlaceRshift)
+
+#undef NB_DECL_COMP
+#undef NB_IMPL_COMP
+#undef NB_DECL_OP_1
+#undef NB_IMPL_OP_1
+#undef NB_DECL_OP_2
+#undef NB_IMPL_OP_2
+#undef NB_DECL_OP_2_I
+#undef NB_IMPL_OP_2_I
+#undef NB_IMPL_OP_2_IO
 
 NAMESPACE_END(detail)
 
@@ -648,8 +750,3 @@ inline detail::fast_iterator list::end() const {
 #endif
 
 NAMESPACE_END(NB_NAMESPACE)
-
-#undef NB_API_COMP
-#undef NB_API_OP_1
-#undef NB_API_OP_2
-#undef NB_API_OP_2_I

@@ -33,7 +33,6 @@ def test04_overloads():
     assert t.test_05(0) == 1
     assert t.test_05(0.0) == 2
 
-
 def test05_signature():
     assert t.test_01.__doc__ == 'test_01() -> None'
     assert t.test_02.__doc__ == 'test_02(j: int = 8, k: int = 1) -> int'
@@ -89,8 +88,8 @@ def test09_maketuple():
     assert t.test_tuple() == ("Hello", 123)
     with pytest.raises(RuntimeError) as excinfo:
         assert t.test_bad_tuple()
-    assert str(excinfo.value) == (
-        "nanobind::detail::tuple_check(...): conversion of argument 2 failed!")
+    value = str(excinfo.value)
+    assert value == "std::bad_cast" or value == 'bad cast'
 
 
 def test10_cpp_call_simple():
@@ -138,6 +137,7 @@ def test13_call_guard():
     assert t.call_guard_value() == 0
     assert t.test_call_guard() == 1
     assert t.call_guard_value() == 2
+    assert t.test_call_guard_wrapper_rvalue_ref(1) == 1
     assert not t.test_release_gil()
 
 
@@ -301,3 +301,24 @@ def test33_method_on_non_nanobind_class():
     a = AClass()
     assert a.simple_method(7) == 49
     assert a.complex_method(y=2) == 84
+
+
+def test34_module_docstring():
+    assert t.__doc__ == 'function testcase'
+
+def test35_return_capture():
+    x = t.test_35()
+    assert x() == 'Test Foo'
+
+def test36_test_char():
+    assert t.test_cast_char('c') == 'c'
+    with pytest.raises(TypeError):
+        assert t.test_cast_char('abc')
+    with pytest.raises(RuntimeError):
+        assert t.test_cast_char(123)
+
+def test37_test_str():
+    assert t.test_cast_str('c') == 'c'
+    assert t.test_cast_str('abc') == 'abc'
+    with pytest.raises(RuntimeError):
+        assert t.test_cast_str(123)

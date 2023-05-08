@@ -31,7 +31,7 @@
 # define  NB_STRDUP        _strdup
 #else
 #  define NB_EXPORT        __attribute__ ((visibility("default")))
-#  define NB_IMPORT        __attribute__ ((visibility("default")))
+#  define NB_IMPORT        NB_EXPORT
 #  define NB_INLINE        inline __attribute__((always_inline))
 #  define NB_NOINLINE      __attribute__((noinline))
 #if defined(__clang__)
@@ -63,11 +63,13 @@
 #    define NB_CORE NB_IMPORT
 #  endif
 #else
-#  if defined(_WIN32)
-#    define NB_CORE
-#  else
-#    define NB_CORE NB_EXPORT
-#  endif
+#  define NB_CORE
+#endif
+
+#if !defined(NB_SHARED) && defined(__GNUC__)
+#  define NB_EXPORT_SHARED __attribute__ ((visibility("hidden")))
+#else
+#  define NB_EXPORT_SHARED
 #endif
 
 #if defined(__cpp_lib_char8_t) && __cpp_lib_char8_t >= 201811L
@@ -131,12 +133,15 @@
 #    error "nanobind requires a newer PyPy version (>= 7.3.10)"
 #endif
 
-#define NB_MODULE(name, variable)                                              \
+#define NB_MODULE_IMPL(name)                                                   \
     extern "C" [[maybe_unused]] NB_EXPORT PyObject *PyInit_##name();           \
+    extern "C" NB_EXPORT PyObject *PyInit_##name()
+
+#define NB_MODULE(name, variable)                                              \
     static PyModuleDef NB_CONCAT(nanobind_module_def_, name);                  \
     [[maybe_unused]] static void NB_CONCAT(nanobind_init_,                     \
                                            name)(::nanobind::module_ &);       \
-    extern "C" NB_EXPORT PyObject *PyInit_##name() {                           \
+    NB_MODULE_IMPL(name) {                                                     \
         nanobind::module_ m =                                                  \
             nanobind::steal<nanobind::module_>(nanobind::detail::module_new(   \
                 NB_TOSTRING(name), &NB_CONCAT(nanobind_module_def_, name)));   \

@@ -28,6 +28,9 @@ inline NB_NOINLINE std::shared_ptr<void>
 shared_from_python(void *ptr, handle h) noexcept {
     struct py_deleter {
         void operator()(void *) noexcept {
+            // Don't run the deleter if the interpreter has been shut down
+            if (!Py_IsInitialized())
+                return;
             gil_scoped_acquire guard;
             Py_DECREF(o);
         }
@@ -62,10 +65,11 @@ template <typename T> struct type_caster<std::shared_ptr<T>> {
                   "Binding 'shared_ptr<T>' requires that 'T' can also be bound "
                   "by nanobind. It appears that you specified a type which "
                   "would undergo conversion/copying, which is not allowed.");
-    static_assert(
-        !uses_shared_from_this<T>::value,
-        "nanobind does not permit use of std::shared_from_this, which can "
-        "cause undefined behavior. (Refer to docs/ownership.md for details.)");
+    static_assert(!uses_shared_from_this<T>::value,
+                  "nanobind does not permit use of std::shared_from_this, "
+                  "which can cause undefined behavior. (Refer to "
+                  "https://nanobind.readthedocs.io/en/latest/ownership.html "
+                  "for details.)");
 
     static constexpr auto Name = Caster::Name;
     static constexpr bool IsClass = true;
@@ -96,8 +100,26 @@ template <typename T> struct type_caster<std::shared_ptr<T>> {
     static handle from_cpp(const Value &value, rv_policy,
                            cleanup_list *cleanup) noexcept {
         bool is_new = false;
-        handle result = nb_type_put(&typeid(T), value.get(),
-                                    rv_policy::reference, cleanup, &is_new);
+        handle result;
+
+        T *ptr = value.get();
+        const std::type_info *type = &typeid(T);
+
+        constexpr bool has_type_hook =
+            !std::is_base_of_v<std::false_type, type_hook<T>>;
+        if constexpr (has_type_hook)
+            type = type_hook<T>::get(ptr);
+
+        if constexpr (!std::is_polymorphic_v<T>) {
+            result = nb_type_put(type, ptr, rv_policy::reference,
+                                 cleanup, &is_new);
+        } else {
+            const std::type_info *type_p =
+                (!has_type_hook && ptr) ? &typeid(*ptr) : nullptr;
+
+            result = nb_type_put_p(type, type_p, ptr, rv_policy::reference,
+                                   cleanup, &is_new);
+        }
 
         if (is_new)
             shared_from_cpp(std::static_pointer_cast<void>(value),

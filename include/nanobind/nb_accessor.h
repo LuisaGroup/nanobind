@@ -157,6 +157,10 @@ template <typename D> accessor<str_attr> api<D>::attr(const char *key) const {
     return { derived(), key };
 }
 
+template <typename D> accessor<str_attr> api<D>::doc() const {
+    return { derived(), "__doc__" };
+}
+
 template <typename D> accessor<obj_item> api<D>::operator[](handle key) const {
     return { derived(), borrow(key) };
 }
@@ -181,6 +185,11 @@ detail::accessor<detail::num_item_list> list::operator[](T index) const {
 template <typename T, detail::enable_if_t<std::is_arithmetic_v<T>>>
 detail::accessor<detail::num_item_tuple> tuple::operator[](T index) const {
     return { derived(), (Py_ssize_t) index };
+}
+
+template <typename... Args> str str::format(Args&&... args) {
+    return steal<str>(
+        derived().attr("format")((detail::forward_t<Args>) args...).release());
 }
 
 NAMESPACE_END(NB_NAMESPACE)

@@ -24,10 +24,10 @@ void raise(const char *fmt, ...) {
     va_list args;
 
     va_start(args, fmt);
-    size_t size = vsnprintf(buf, sizeof(buf), fmt, args);
+    int size = vsnprintf(buf, sizeof(buf), fmt, args);
     va_end(args);
 
-    if (size < sizeof(buf))
+    if (size < (int) sizeof(buf))
         throw std::runtime_error(buf);
 
     scoped_pymalloc<char> temp(size + 1);
@@ -56,19 +56,19 @@ void fail(const char *fmt, ...) noexcept {
 }
 
 PyObject *capsule_new(const void *ptr, const char *name,
-        void (*free)(void *) noexcept) noexcept {
-    auto capsule_free = [](PyObject *o) {
-        auto free_2 = (void (*)(void *))(PyCapsule_GetContext(o));
-        if (free_2)
-            free_2(PyCapsule_GetPointer(o, PyCapsule_GetName(o)));
+        void (*cleanup)(void *) noexcept) noexcept {
+    auto capsule_cleanup = [](PyObject *o) {
+        auto cleanup_2 = (void (*)(void *))(PyCapsule_GetContext(o));
+        if (cleanup_2)
+            cleanup_2(PyCapsule_GetPointer(o, PyCapsule_GetName(o)));
     };
 
-    PyObject *c = PyCapsule_New((void *) ptr, name, capsule_free);
+    PyObject *c = PyCapsule_New((void *) ptr, name, capsule_cleanup);
 
     if (!c)
         fail("nanobind::detail::capsule_new(): allocation failed!");
 
-    if (PyCapsule_SetContext(c, (void *) free) != 0)
+    if (PyCapsule_SetContext(c, (void *) cleanup) != 0)
         fail("nanobind::detail::capsule_new(): could not set context!");
 
     return c;
@@ -82,8 +82,13 @@ void raise_python_error() {
              "an error condition!");
 }
 
-void raise_next_overload() {
-    throw next_overload();
+void raise_next_overload_if_null(void *p) {
+    if (NB_UNLIKELY(!p))
+        throw next_overload();
+}
+
+void raise_cast_error() {
+    throw cast_error();
 }
 
 // ========================================================================
@@ -184,6 +189,37 @@ size_t obj_len(PyObject *o) {
     return (size_t) res;
 }
 
+size_t obj_len_hint(PyObject *o) noexcept {
+#if !defined(Py_LIMITED_API)
+    Py_ssize_t res = PyObject_LengthHint(o, 0);
+    if (res < 0) {
+        PyErr_Clear();
+        res = 0;
+    }
+    return (size_t) res;
+#else
+    PyTypeObject *tp = Py_TYPE(o);
+    lenfunc l = (lenfunc) PyType_GetSlot(tp, Py_sq_length);
+    if (!l)
+        l = (lenfunc) PyType_GetSlot(tp, Py_mp_length);
+
+    if (l) {
+        Py_ssize_t res = l(o);
+        if (res < 0) {
+            PyErr_Clear();
+            res = 0;
+        }
+        return (size_t) res;
+    }
+
+    try {
+        return cast<size_t>(handle(o).attr("__length_hint__")());
+    } catch (...) {
+        return 0;
+    }
+#endif
+}
+
 PyObject *obj_repr(PyObject *o) {
     PyObject *res = PyObject_Repr(o);
     if (!res)
@@ -216,22 +252,22 @@ PyObject *obj_op_2(PyObject *a, PyObject *b,
 
 PyObject *obj_vectorcall(PyObject *base, PyObject *const *args, size_t nargsf,
                          PyObject *kwnames, bool method_call) {
-    const char *error = nullptr;
     PyObject *res = nullptr;
+    bool gil_error = false, cast_error = false;
 
-    size_t nargs_total =
-        NB_VECTORCALL_NARGS(nargsf) + (kwnames ? NB_TUPLE_GET_SIZE(kwnames) : 0);
+    size_t nargs_total = (size_t) (NB_VECTORCALL_NARGS(nargsf) +
+                         (kwnames ? NB_TUPLE_GET_SIZE(kwnames) : 0));
 
 #if !defined(Py_LIMITED_API)
     if (!PyGILState_Check()) {
-        error = "nanobind::detail::obj_vectorcall(): PyGILState_Check() failure." ;
+        gil_error = true;
         goto end;
     }
 #endif
 
     for (size_t i = 0; i < nargs_total; ++i) {
         if (!args[i]) {
-            error = "nanobind::detail::obj_vectorcall(): argument conversion failure." ;
+            cast_error = true;
             goto end;
         }
     }
@@ -257,10 +293,14 @@ end:
     Py_XDECREF(kwnames);
     Py_DECREF(base);
 
-    if (error)
-        raise("%s", error);
-    else if (!res)
-        raise_python_error();
+    if (!res) {
+        if (cast_error)
+            raise_cast_error();
+        else if (gil_error)
+            raise("nanobind::detail::obj_vectorcall(): PyGILState_Check() failure.");
+        else
+            raise_python_error();
+    }
 
     return res;
 }
@@ -345,6 +385,18 @@ void setattr(PyObject *obj, const char *key, PyObject *value) {
 
 void setattr(PyObject *obj, PyObject *key, PyObject *value) {
     int rv = PyObject_SetAttr(obj, key, value);
+    if (rv)
+        raise_python_error();
+}
+
+void delattr(PyObject *obj, const char *key) {
+    int rv = PyObject_DelAttrString(obj, key);
+    if (rv)
+        raise_python_error();
+}
+
+void delattr(PyObject *obj, PyObject *key) {
+    int rv = PyObject_DelAttr(obj, key);
     if (rv)
         raise_python_error();
 }
@@ -463,7 +515,7 @@ PyObject *bytes_from_cstr_and_size(const char *str, size_t size) {
 }
 
 // ========================================================================
-//
+
 PyObject *int_from_obj(PyObject *o) {
     PyObject *result = PyNumber_Long(o);
     if (!result)
@@ -658,12 +710,10 @@ PyObject **seq_get_with_size(PyObject *seq, size_t size,
 
 // ========================================================================
 
-void property_install(PyObject *scope, const char *name, bool is_static,
-                      PyObject *getter, PyObject *setter) noexcept {
+static void property_install_impl(PyTypeObject *tp, PyObject *scope,
+                                  const char *name, PyObject *getter,
+                                  PyObject *setter) {
     const nb_internals &internals = internals_get();
-    handle property = (PyObject *) (is_static ? internals.nb_static_property
-                                              : &PyProperty_Type);
-    (void) is_static;
     PyObject *m = getter ? getter : setter;
     object doc = none();
 
@@ -674,7 +724,7 @@ void property_install(PyObject *scope, const char *name, bool is_static,
             doc = str(f->doc);
     }
 
-    handle(scope).attr(name) = property(
+    handle(scope).attr(name) = handle(tp)(
         getter ? handle(getter) : handle(Py_None),
         setter ? handle(setter) : handle(Py_None),
         handle(Py_None), // deleter
@@ -682,13 +732,23 @@ void property_install(PyObject *scope, const char *name, bool is_static,
     );
 }
 
+void property_install(PyObject *scope, const char *name, PyObject *getter,
+                      PyObject *setter) noexcept {
+    property_install_impl(&PyProperty_Type, scope, name, getter, setter);
+}
+
+void property_install_static(PyObject *scope, const char *name,
+                             PyObject *getter, PyObject *setter) noexcept {
+    property_install_impl(nb_static_property_tp(), scope, name, getter,
+                          setter);
+}
+
 // ========================================================================
 
 void tuple_check(PyObject *tuple, size_t nargs) {
     for (size_t i = 0; i < nargs; ++i) {
         if (!NB_TUPLE_GET_ITEM(tuple, i))
-            raise("nanobind::detail::tuple_check(...): conversion of argument "
-                  "%zu failed!", i + 1);
+            raise_cast_error();
     }
 }
 
@@ -768,32 +828,6 @@ bool load_f32(PyObject *o, uint8_t flags, float *out) noexcept {
 template <typename T, bool Recurse = true>
 NB_INLINE bool load_int(PyObject *o, uint32_t flags, T *out) noexcept {
     if (NB_LIKELY(PyLong_CheckExact(o))) {
-        // Fast path for integers that aren't too large (max. one 15- or 30-bit "digit")
-        #if !defined(Py_LIMITED_API) && !defined(PYPY_VERSION)
-            PyLongObject *lo = (PyLongObject *) o;
-            int size = Py_SIZE(o);
-
-            if (size == 0 || size == 1) {
-                digit value_d = lo->ob_digit[0];
-                T value = (T) value_d;
-                *out = value;
-                return sizeof(T) >= sizeof(digit) || value_d == (digit) value;
-            }
-
-            if constexpr (std::is_unsigned_v<T>) {
-                if (size < 0)
-                    return false;
-            } else {
-                if (size == -1) {
-                    sdigit value_d = - (sdigit) lo->ob_digit[0];
-                    T value = (T) value_d;
-                    *out = value;
-                    return sizeof(T) >= sizeof(sdigit) || value_d == (sdigit) value;
-                }
-            }
-        #endif
-
-
         // Slow path
         using T0 = std::conditional_t<sizeof(T) <= sizeof(long), long, long long>;
         using Tp = std::conditional_t<std::is_signed_v<T>, T0, std::make_unsigned_t<T0>>;
@@ -819,14 +853,19 @@ NB_INLINE bool load_int(PyObject *o, uint32_t flags, T *out) noexcept {
 
         *out = value;
         return true;
-    } else if (Recurse && (flags & (uint8_t) cast_flags::convert) && !PyFloat_Check(o)) {
-        PyObject *temp = PyNumber_Long(o);
-        if (temp) {
-            bool result = load_int<T, false>(temp, 0, out);
-            Py_DECREF(temp);
-            return result;
-        } else {
-            PyErr_Clear();
+    }
+
+    if constexpr (Recurse) {
+        if ((flags & (uint8_t)cast_flags::convert) && !PyFloat_Check(o)) {
+            PyObject* temp = PyNumber_Long(o);
+            if (temp) {
+                bool result = load_int<T, false>(temp, 0, out);
+                Py_DECREF(temp);
+                return result;
+            }
+            else {
+                PyErr_Clear();
+            }
         }
     }
 
@@ -865,25 +904,94 @@ bool load_i64(PyObject *o, uint8_t flags, int64_t *out) noexcept {
     return load_int(o, flags, out);
 }
 
-
 // ========================================================================
 
 void incref_checked(PyObject *o) noexcept {
     if (!o)
         return;
+#if !defined(Py_LIMITED_API)
     if (!PyGILState_Check())
         fail("nanobind::detail::incref_check(): attempted to change the "
              "reference count of a Python object while the GIL was not held.");
+#endif
     Py_INCREF(o);
 }
 
 void decref_checked(PyObject *o) noexcept {
     if (!o)
         return;
+#if !defined(Py_LIMITED_API)
     if (!PyGILState_Check())
         fail("nanobind::detail::decref_check(): attempted to change the "
              "reference count of a Python object while the GIL was not held.");
+#endif
     Py_DECREF(o);
+}
+
+// ========================================================================
+
+void set_leak_warnings(bool value) noexcept {
+    internals_get().print_leak_warnings = value;
+}
+
+void set_implicit_cast_warnings(bool value) noexcept {
+    internals_get().print_implicit_cast_warnings = value;
+}
+
+// ========================================================================
+
+void slice_compute(PyObject *slice, Py_ssize_t size, Py_ssize_t &start,
+                   Py_ssize_t &stop, Py_ssize_t &step,
+                   size_t &slice_length) {
+    if (PySlice_Unpack(slice, &start, &stop, &step) < 0)
+        detail::raise_python_error();
+    Py_ssize_t slice_length_ =
+        PySlice_AdjustIndices((Py_ssize_t) size, &start, &stop, step);
+    slice_length = (size_t) slice_length_;
+}
+
+bool iterable_check(PyObject *o) noexcept {
+#if !defined(Py_LIMITED_API)
+    return Py_TYPE(o)->tp_iter != nullptr || PySequence_Check(o);
+#else
+    PyObject *it = PyObject_GetIter(o);
+    if (it) {
+        Py_DECREF(it);
+        return true;
+    } else {
+        PyErr_Clear();
+        return false;
+    }
+#endif
+}
+
+// ========================================================================
+
+NB_CORE PyObject *repr_list(PyObject *o) {
+    object s = steal(nb_inst_name(o));
+    s += str("([");
+    size_t len = obj_len(o);
+    for (size_t i = 0; i < len; ++i) {
+        s += repr(handle(o)[i]);
+        if (i + 1 < len)
+            s += str(", ");
+    }
+    s += str("])");
+    return s.release().ptr();
+}
+
+NB_CORE PyObject *repr_map(PyObject *o) {
+    object s = steal(nb_inst_name(o));
+    s += str("({");
+    bool first = true;
+    for (handle kv : handle(o).attr("items")()) {
+        if (!first)
+            s += str(", ");
+        s += repr(kv[0]) + str(": ") + repr(kv[1]);
+        first = false;
+    }
+    s += str("})");
+    return s.release().ptr();
 }
 
 NAMESPACE_END(detail)

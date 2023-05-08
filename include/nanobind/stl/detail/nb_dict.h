@@ -1,5 +1,5 @@
 /*
-    nanobind/stl/details/nb_dict.h: base class of dict casters
+    nanobind/stl/detail/nb_dict.h: base class of dict casters
 
     Copyright (c) 2022 Matej Ferencevic and Wenzel Jakob
 
@@ -73,7 +73,7 @@ template <typename Value_, typename Key, typename Element> struct dict_caster {
 
                 if (!k.is_valid() || !e.is_valid() ||
                     PyDict_SetItem(ret.ptr(), k.ptr(), e.ptr()) != 0) {
-                    ret.clear();
+                    ret.reset();
                     break;
                 }
             }

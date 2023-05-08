@@ -6,20 +6,20 @@ project(nanobind)
 # ---------------------------------------------------------------------------
 
 if (CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
-  set(NB_TEST_DEFAULT ON)
+  set(NB_MASTER_PROJECT ON)
 else()
-  set(NB_TEST_DEFAULT OFF)
+  set(NB_MASTER_PROJECT OFF)
 endif()
 
-option(NB_TEST              "Compile nanobind tests?" ${NB_TEST_DEFAULT})
+option(NB_TEST              "Compile nanobind tests?" ${NB_MASTER_PROJECT})
 option(NB_TEST_STABLE_ABI   "Test the stable ABI interface?" OFF)
-option(NB_TEST_STATIC_BUILD "Build the nanobind library statically for the test suite?" OFF)
+option(NB_TEST_SHARED_BUILD "Build a shared nanobind library for the test suite?" OFF)
 
 # ---------------------------------------------------------------------------
 # Do a release build if nothing was specified
 # ---------------------------------------------------------------------------
 
-if (NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+if (NB_MASTER_PROJECT AND NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   message(STATUS "nanobind: setting build type to 'Release' as none was specified.")
   set(CMAKE_BUILD_TYPE Release CACHE STRING "Choose the type of build." FORCE)
   set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS "Debug" "Release"
@@ -56,7 +56,14 @@ endif()
 
 if (NOT TARGET Python::Module OR NOT TARGET Python::Interpreter)
     set(Python_FIND_FRAMEWORK LAST) # Prefer Brew/Conda to Apple framework python
-    find_package(Python 3.8 COMPONENTS Interpreter Development REQUIRED)
+
+    if (WIN32 AND CMAKE_VERSION VERSION_GREATER_EQUAL 3.26 AND Python_INTERPRETER_ID STREQUAL "Python")
+      # Windows stable ABI builds for CPython require Development.SABIModule provided by CMake>=3.26
+      find_package(Python 3.8 COMPONENTS Interpreter Development.Module Development.SABIModule REQUIRED)
+    else()
+      # The following suffices in all other cases
+      find_package(Python 3.8 COMPONENTS Interpreter Development REQUIRED)
+    endif()
 endif()
 
 # ---------------------------------------------------------------------------

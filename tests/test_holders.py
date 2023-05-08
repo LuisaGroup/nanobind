@@ -133,6 +133,7 @@ def test06_uniqueptr_from_py(clean):
     collect()
     assert t.stats() == (1, 1)
 
+
 def test07_uniqueptr_passthrough(clean):
     assert t.passthrough_unique(t.unique_from_cpp()).value == 1
     assert t.passthrough_unique(t.unique_from_cpp_2()).value == 2
@@ -148,3 +149,30 @@ def test07_uniqueptr_passthrough(clean):
     assert t.passthrough_unique_2(t.Example(1)).value == 1
     collect()
     assert t.stats() == (2, 2)
+
+
+def test07_polymorphic_downcast_unique():
+    assert isinstance(t.u_factory(), t.Base)
+    assert isinstance(t.u_factory_2(), t.Base)
+    assert isinstance(t.u_polymorphic_factory(), t.PolymorphicSubclass)
+    assert isinstance(t.u_polymorphic_factory_2(), t.PolymorphicBase)
+
+
+def test08_polymorphic_downcast_shared():
+    assert isinstance(t.s_factory(), t.Base)
+    assert isinstance(t.s_factory_2(), t.Base)
+    assert isinstance(t.s_polymorphic_factory(), t.PolymorphicSubclass)
+    assert isinstance(t.s_polymorphic_factory_2(), t.PolymorphicBase)
+
+def test09_tag_based():
+    assert isinstance(t.make_pet(t.PetKind.Dog), t.Dog)
+    assert isinstance(t.make_pet(t.PetKind.Cat), t.Cat)
+
+
+def test09_tag_based_unique():
+    assert isinstance(t.make_pet_u(t.PetKind.Dog), t.Dog)
+    assert isinstance(t.make_pet_u(t.PetKind.Cat), t.Cat)
+
+def test09_tag_based_shared():
+    assert isinstance(t.make_pet_s(t.PetKind.Dog), t.Dog)
+    assert isinstance(t.make_pet_s(t.PetKind.Cat), t.Cat)

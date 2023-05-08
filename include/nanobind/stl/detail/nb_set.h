@@ -1,5 +1,5 @@
 /*
-    nanobind/stl/details/nb_set.h: base class of set casters
+    nanobind/stl/detail/nb_set.h: base class of set casters
 
     Copyright (c) 2022 Raymond Yun Fei and Wenzel Jakob
 
@@ -62,7 +62,7 @@ template <typename Value_, typename Key> struct set_caster {
                     KeyCaster::from_cpp(forward_like<T>(key), policy, cleanup));
 
                 if (!k.is_valid() || PySet_Add(ret.ptr(), k.ptr()) != 0) {
-                    ret.clear();
+                    ret.reset();
                     break;
                 }
             }

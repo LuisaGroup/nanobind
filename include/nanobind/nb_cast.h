@@ -27,8 +27,6 @@
     template <> class type_caster<__VA_ARGS__>                                 \
         : public type_caster_base<__VA_ARGS__> { }; }
 
-#define NB_TYPE(...) __VA_ARGS__
-
 NAMESPACE_BEGIN(NB_NAMESPACE)
 NAMESPACE_BEGIN(detail)
 
@@ -205,7 +203,42 @@ template <> struct type_caster<char> {
     explicit operator char() {
         if (value && value[0] && value[1] == '\0')
             return value[0];
-        throw next_overload();
+        else
+            throw next_overload();
+    }
+};
+
+template <typename T> struct type_caster<pointer_and_handle<T>> {
+    using Caster = detail::make_caster<T>;
+    using T2 = pointer_and_handle<T>;
+    NB_TYPE_CASTER(T2, Caster::Name)
+
+    bool from_python(handle src, uint8_t flags, cleanup_list *cleanup) noexcept {
+        Caster c;
+        if (!c.from_python(src, flags, cleanup))
+            return false;
+        value.h = src;
+        value.p = c.operator T*();
+        return true;
+    }
+};
+
+template <typename T, typename X> struct type_caster<typed<T, X>> {
+    using Caster = detail::make_caster<T>;
+    using T2 = typed<T, X>;
+    NB_TYPE_CASTER(T2, X::Name)
+
+    bool from_python(handle src, uint8_t flags, cleanup_list *cleanup) noexcept {
+        Caster c;
+        if (!c.from_python(src, flags, cleanup))
+            return false;
+        value = T2{ (T &&) c.value };
+        return true;
+    }
+
+    static handle from_cpp(const T2 &src, rv_policy policy,
+                           cleanup_list *cleanup) noexcept {
+        return Caster::from_cpp(src.value, policy, cleanup);
     }
 };
 
@@ -252,6 +285,8 @@ template <typename T> NB_INLINE rv_policy infer_policy(rv_policy policy) {
     return policy;
 }
 
+template <typename T, typename SFINAE = int> struct type_hook : std::false_type { };
+
 template <typename Type_> struct type_caster_base {
     using Type = Type_;
     static constexpr auto Name = const_name<Type>();
@@ -268,27 +303,38 @@ template <typename Type_> struct type_caster_base {
     template <typename T>
     NB_INLINE static handle from_cpp(T &&value, rv_policy policy,
                                      cleanup_list *cleanup) noexcept {
-        Type *value_p;
+        Type *ptr;
         if constexpr (is_pointer_v<T>)
-            value_p = (Type *) value;
+            ptr = (Type *) value;
         else
-            value_p = (Type *) &value;
+            ptr = (Type *) &value;
 
-        return nb_type_put(&typeid(Type), value_p, infer_policy<T>(policy),
-                           cleanup, nullptr);
+        policy = infer_policy<T>(policy);
+        const std::type_info *type = &typeid(Type);
+
+        constexpr bool has_type_hook =
+            !std::is_base_of_v<std::false_type, type_hook<Type>>;
+        if constexpr (has_type_hook)
+            type = type_hook<Type>::get(ptr);
+
+        if constexpr (!std::is_polymorphic_v<Type>) {
+            return nb_type_put(type, ptr, policy, cleanup);
+        } else {
+            const std::type_info *type_p =
+                (!has_type_hook && ptr) ? &typeid(*ptr) : nullptr;
+            return nb_type_put_p(type, type_p, ptr, policy, cleanup);
+        }
     }
 
     operator Type*() { return value; }
 
     operator Type&() {
-        if (!value)
-            raise_next_overload();
+        raise_next_overload_if_null(value);
         return *value;
     }
 
     operator Type&&() && {
-        if (!value)
-            raise_next_overload();
+        raise_next_overload_if_null(value);
         return (Type &&) *value;
     }
 
@@ -306,27 +352,31 @@ T cast(const detail::api<Derived> &value, bool convert = true) {
     if constexpr (std::is_same_v<T, void>) {
         return;
     } else {
-        using Ti     = detail::intrinsic_t<T>;
-        using Caster = detail::make_caster<Ti>;
+        using Caster = detail::make_caster<T>;
+        using Output = typename Caster::template Cast<T>;
+
+        static_assert(
+            !(std::is_reference_v<T> || std::is_pointer_v<T>) || Caster::IsClass ||
+            std::is_same_v<const char *, T>,
+            "nanobind::cast(): cannot return a reference to a temporary.");
 
         Caster caster;
         if (!caster.from_python(value.derived().ptr(),
                                 convert ? (uint8_t) detail::cast_flags::convert
                                         : (uint8_t) 0, nullptr))
-            detail::raise("nanobind::cast(...): conversion failed!");
+            detail::raise_cast_error();
 
-        if constexpr (std::is_same_v<T, const char *>) {
-            return caster.operator const char *();
-        } else {
-            static_assert(
-                !(std::is_reference_v<T> || std::is_pointer_v<T>) || Caster::IsClass,
-                "nanobind::cast(): cannot return a reference to a temporary.");
+        // GCC misses that from_python will return or ensure orderly initialization
+        #if defined(__GNUC__) && !defined(__clang__)
+          #pragma GCC diagnostic push
+          #pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
+        #endif
 
-            if constexpr (detail::is_pointer_v<T>)
-                return caster.operator Ti*();
-            else
-                return caster.operator Ti&();
-        }
+        return caster.operator Output();
+
+        #if defined(__GNUC__) && !defined(__clang__)
+          #pragma GCC diagnostic pop
+        #endif
     }
 }
 
@@ -335,7 +385,7 @@ object cast(T &&value, rv_policy policy = rv_policy::automatic_reference) {
     handle h = detail::make_caster<T>::from_cpp(
         (detail::forward_t<T>) value, detail::infer_policy<T>(policy), nullptr);
     if (!h.is_valid())
-        detail::raise("nanobind::cast(...): conversion failed!");
+        detail::raise_cast_error();
     return steal(h);
 }
 

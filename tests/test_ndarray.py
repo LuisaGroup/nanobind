@@ -1,4 +1,4 @@
-import test_tensor_ext as t
+import test_ndarray_ext as t
 import pytest
 import warnings
 import importlib
@@ -52,29 +52,39 @@ def test01_metadata():
 
     a = np.zeros(shape=(3, 4, 5))
     assert t.get_shape(a) == [3, 4, 5]
+    assert t.get_size(a) == 60
+    assert t.check_shape_ptr(a)
+    assert t.check_stride_ptr(a)
     if hasattr(a, '__dlpack__'):
         assert t.get_shape(a.__dlpack__()) == [3, 4, 5]
-    assert not t.check_float(np.array([1], dtype=np.uint32)) and \
+    assert not t.check_float(np.array([1], dtype=np.bool_)) and \
+           not t.check_float(np.array([1], dtype=np.uint32)) and \
                t.check_float(np.array([1], dtype=np.float32))
+    assert not t.check_bool(np.array([1], dtype=np.uint32)) and \
+           not t.check_bool(np.array([1], dtype=np.float32)) and \
+               t.check_bool(np.array([1], dtype=np.bool_))
 
 
 def test02_docstr():
-    assert t.get_shape.__doc__ == "get_shape(array: tensor[]) -> list"
-    assert t.pass_uint32.__doc__ == "pass_uint32(array: tensor[dtype=uint32]) -> None"
-    assert t.pass_float32.__doc__ == "pass_float32(array: tensor[dtype=float32]) -> None"
-    assert t.pass_float32_shaped.__doc__ == "pass_float32_shaped(array: tensor[dtype=float32, shape=(3, *, 4)]) -> None"
-    assert t.pass_float32_shaped_ordered.__doc__ == "pass_float32_shaped_ordered(array: tensor[dtype=float32, order='C', shape=(*, *, 4)]) -> None"
-    assert t.check_device.__doc__ == ("check_device(arg: tensor[device='cpu'], /) -> str\n"
-                                      "check_device(arg: tensor[device='cuda'], /) -> str")
+    assert t.get_shape.__doc__ == "get_shape(array: ndarray[]) -> list"
+    assert t.pass_uint32.__doc__ == "pass_uint32(array: ndarray[dtype=uint32]) -> None"
+    assert t.pass_float32.__doc__ == "pass_float32(array: ndarray[dtype=float32]) -> None"
+    assert t.pass_bool.__doc__ == "pass_bool(array: ndarray[dtype=bool]) -> None"
+    assert t.pass_float32_shaped.__doc__ == "pass_float32_shaped(array: ndarray[dtype=float32, shape=(3, *, 4)]) -> None"
+    assert t.pass_float32_shaped_ordered.__doc__ == "pass_float32_shaped_ordered(array: ndarray[dtype=float32, order='C', shape=(*, *, 4)]) -> None"
+    assert t.check_device.__doc__ == ("check_device(arg: ndarray[device='cpu'], /) -> str\n"
+                                      "check_device(arg: ndarray[device='cuda'], /) -> str")
 
 
 @needs_numpy
 def test03_constrain_dtype():
     a_u32 = np.array([1], dtype=np.uint32)
     a_f32 = np.array([1], dtype=np.float32)
+    a_bool = np.array([1], dtype=np.bool_)
 
     t.pass_uint32(a_u32)
     t.pass_float32(a_f32)
+    t.pass_bool(a_bool)
 
     with pytest.raises(TypeError) as excinfo:
         t.pass_uint32(a_f32)
@@ -82,6 +92,10 @@ def test03_constrain_dtype():
 
     with pytest.raises(TypeError) as excinfo:
         t.pass_float32(a_u32)
+    assert 'incompatible function arguments' in str(excinfo.value)
+
+    with pytest.raises(TypeError) as excinfo:
+        t.pass_bool(a_u32)
     assert 'incompatible function arguments' in str(excinfo.value)
 
 
@@ -171,6 +185,10 @@ def test09_implicit_conversion():
     t.implicit(np.zeros((2, 2), dtype=np.uint32))
     t.implicit(np.zeros((2, 2, 10), dtype=np.float32)[:, :, 4])
     t.implicit(np.zeros((2, 2, 10), dtype=np.uint32)[:, :, 4])
+    t.implicit(np.zeros((2, 2, 10), dtype=np.bool_)[:, :, 4])
+
+    with pytest.raises(TypeError) as excinfo:
+        t.noimplicit(np.zeros((2, 2), dtype=np.bool_))
 
     with pytest.raises(TypeError) as excinfo:
         t.noimplicit(np.zeros((2, 2), dtype=np.uint32))
@@ -212,9 +230,13 @@ def test11_implicit_conversion_tensorflow():
         t.implicit(tf.zeros((2, 2), dtype=tf.int32))
         t.implicit(tf.zeros((2, 2, 10), dtype=tf.float32)[:, :, 4])
         t.implicit(tf.zeros((2, 2, 10), dtype=tf.int32)[:, :, 4])
+        t.implicit(tf.zeros((2, 2, 10), dtype=tf.bool)[:, :, 4])
 
         with pytest.raises(TypeError) as excinfo:
             t.noimplicit(tf.zeros((2, 2), dtype=tf.int32))
+
+        with pytest.raises(TypeError) as excinfo:
+            t.noimplicit(tf.zeros((2, 2), dtype=tf.bool))
 
 
 @needs_jax
@@ -229,10 +251,13 @@ def test12_implicit_conversion_jax():
     t.implicit(jnp.zeros((2, 2), dtype=jnp.int32))
     t.implicit(jnp.zeros((2, 2, 10), dtype=jnp.float32)[:, :, 4])
     t.implicit(jnp.zeros((2, 2, 10), dtype=jnp.int32)[:, :, 4])
+    t.implicit(jnp.zeros((2, 2, 10), dtype=jnp.bool_)[:, :, 4])
 
     with pytest.raises(TypeError) as excinfo:
         t.noimplicit(jnp.zeros((2, 2), dtype=jnp.int32))
 
+    with pytest.raises(TypeError) as excinfo:
+        t.noimplicit(jnp.zeros((2, 2), dtype=jnp.uint8))
 
 def test13_destroy_capsule():
     collect()
@@ -336,3 +361,52 @@ def test18_return_array_scalar():
     del x
     collect()
     assert t.destruct_count() - dc == 1
+
+# See PR #162
+@needs_torch
+def test19_single_and_empty_dimension_pytorch():
+    a = torch.ones((1,100,1025), dtype=torch.float32)
+    t.noop_3d_c_contig(a)
+    a = torch.ones((100,1,1025), dtype=torch.float32)
+    t.noop_3d_c_contig(a)
+    a = torch.ones((0,100,1025), dtype=torch.float32)
+    t.noop_3d_c_contig(a)
+    a = torch.ones((100,0,1025), dtype=torch.float32)
+    t.noop_3d_c_contig(a)
+    a = torch.ones((100,1025,0), dtype=torch.float32)
+    t.noop_3d_c_contig(a)
+    a = torch.ones((100,0,0), dtype=torch.float32)
+    t.noop_3d_c_contig(a)
+    a = torch.ones((0,0,0), dtype=torch.float32)
+    t.noop_3d_c_contig(a)
+
+# See PR #162
+@needs_numpy
+def test20_single_and_empty_dimension_numpy():
+    a = np.ones((1,100,1025), dtype=np.float32)
+    t.noop_3d_c_contig(a)
+    a = np.ones((100,1,1025), dtype=np.float32)
+    t.noop_3d_c_contig(a)
+    a = np.ones((0,100,1025), dtype=np.float32)
+    t.noop_3d_c_contig(a)
+    a = np.ones((100,0,1025), dtype=np.float32)
+    t.noop_3d_c_contig(a)
+    a = np.ones((100,1025,0), dtype=np.float32)
+    t.noop_3d_c_contig(a)
+    a = np.ones((100,0,0), dtype=np.float32)
+    t.noop_3d_c_contig(a)
+    a = np.ones((0,0,0), dtype=np.float32)
+    t.noop_3d_c_contig(a)
+
+# See PR #162
+@needs_torch
+def test21_single_and_empty_dimension_fortran_order_pytorch():
+    # This idiom creates a pytorch 2D tensor in column major (aka, 'F') ordering
+    a = torch.ones((0,100), dtype=torch.float32).t().contiguous().t()
+    t.noop_2d_f_contig(a)
+    a = torch.ones((100,0), dtype=torch.float32).t().contiguous().t()
+    t.noop_2d_f_contig(a)
+    a = torch.ones((1,100), dtype=torch.float32).t().contiguous().t()
+    t.noop_2d_f_contig(a)
+    a = torch.ones((100,1), dtype=torch.float32).t().contiguous().t()
+    t.noop_2d_f_contig(a)

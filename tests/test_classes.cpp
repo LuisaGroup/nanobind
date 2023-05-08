@@ -6,6 +6,8 @@
 #include <nanobind/stl/shared_ptr.h>
 #include <memory>
 #include <cstring>
+#include <vector>
+#include <nanobind/stl/detail/traits.h>
 
 namespace nb = nanobind;
 using namespace nb::literals;
@@ -132,8 +134,8 @@ NB_MODULE(test_classes_ext, m) {
 
     nb::class_<PairStruct>(m, "PairStruct")
         .def(nb::init<>())
-        .def_readwrite("s1", &PairStruct::s1)
-        .def_readwrite("s2", &PairStruct::s2);
+        .def_rw("s1", &PairStruct::s1)
+        .def_rw("s2", &PairStruct::s2);
 
     m.def("stats", []{
         nb::dict d;
@@ -180,15 +182,15 @@ NB_MODULE(test_classes_ext, m) {
         }
 
         std::string name() const override {
-            NB_OVERRIDE(std::string, Animal, name);
+            NB_OVERRIDE(name);
         }
 
         std::string what() const override {
-            NB_OVERRIDE_PURE(std::string, Animal, what);
+            NB_OVERRIDE_PURE(what);
         }
 
         void void_ret() override {
-            NB_OVERRIDE(void, Animal, void_ret);
+            NB_OVERRIDE(void_ret);
         }
     };
 
@@ -199,6 +201,20 @@ NB_MODULE(test_classes_ext, m) {
         std::string s;
     };
 
+    struct PyDog : Dog {
+        NB_TRAMPOLINE(Dog, 2);
+
+        PyDog(const std::string &s) : Dog(s) { }
+
+        std::string name() const override {
+            NB_OVERRIDE(name);
+        }
+
+        std::string what() const override {
+            NB_OVERRIDE(what);
+        }
+    };
+
     struct Cat : Animal {
         Cat(const std::string &s) : s(s) { }
         std::string name() const override { return "Cat"; }
@@ -206,12 +222,14 @@ NB_MODULE(test_classes_ext, m) {
         std::string s;
     };
 
+    struct Foo { };
+
     auto animal = nb::class_<Animal, PyAnimal>(m, "Animal")
         .def(nb::init<>())
         .def("name", &Animal::name)
         .def("what", &Animal::what);
 
-    nb::class_<Dog, Animal>(m, "Dog")
+    nb::class_<Dog, Animal, PyDog>(m, "Dog")
         .def(nb::init<const std::string &>());
 
     nb::class_<Cat>(m, "Cat", animal)
@@ -220,6 +238,9 @@ NB_MODULE(test_classes_ext, m) {
     m.def("go", [](Animal *a) {
         return a->name() + " says " + a->what();
     });
+
+    m.def("animal_passthrough", [](Animal *a) { return a; }, nb::rv_policy::none);
+    m.def("dog_passthrough", [](Dog *d) { return d; }, nb::rv_policy::none);
 
     m.def("void_ret", [](Animal *a) { a->void_ret(); });
 
@@ -232,8 +253,9 @@ NB_MODULE(test_classes_ext, m) {
     });
 
     // test11_large_pointers
-    m.def("i2p", [](uintptr_t x) { return (Cat *) x; }, nb::rv_policy::reference);
-    m.def("p2i", [](Cat *x) { return (uintptr_t) x; });
+    nb::class_<Foo>(m, "Foo");
+    m.def("i2p", [](uintptr_t x) { return (Foo *) x; }, nb::rv_policy::reference);
+    m.def("p2i", [](Foo *x) { return (uintptr_t) x; });
 
     // test12_implicitly_convertible
     struct A { int a; };
@@ -267,7 +289,7 @@ NB_MODULE(test_classes_ext, m) {
         .def(nb::init_implicit<const B *>())
         .def(nb::init_implicit<int>())
         .def(nb::init_implicit<float>())
-        .def_readwrite("value", &D::value);
+        .def_rw("value", &D::value);
 
     m.def("get_d", [](const D &d) { return d.value; });
 
@@ -304,12 +326,13 @@ NB_MODULE(test_classes_ext, m) {
     struct MyClass { struct NestedClass { }; };
     nb::class_<MyClass> mcls(m, "MyClass");
     nb::class_<MyClass::NestedClass> ncls(mcls, "NestedClass");
+    mcls.def(nb::init<>());
     mcls.def("f", []{});
     ncls.def("f", []{});
 
     // test18_static_properties
     nb::class_<StaticProperties>(m, "StaticProperties")
-        .def_readwrite_static("value", &StaticProperties::value, "Static property docstring")
+        .def_rw_static("value", &StaticProperties::value, "Static property docstring")
         .def_static("get", []{ return StaticProperties::value; } );
 
     nb::class_<StaticProperties2, StaticProperties>(m, "StaticProperties2");
@@ -423,5 +446,35 @@ NB_MODULE(test_classes_ext, m) {
 
     nb::class_<Wrapper>(m, "Wrapper", nb::type_slots(wrapper_slots))
         .def(nb::init<>())
-        .def_readwrite("value", &Wrapper::value);
+        .def_rw("value", &Wrapper::value);
+
+    // The following isn't tested on the Python side, we just want to make sure it compiles
+    struct NonCopyable {
+        NonCopyable() = default;
+        NonCopyable(const NonCopyable&) = delete;
+    };
+
+    using NonCopyableVec = std::vector<NonCopyable>;
+    nb::class_<NonCopyableVec>(m, "NonCopyableVec");
+
+    m.def("is_int_1", [](nb::handle h) { return nb::isinstance<int>(h); });
+    m.def("is_int_2", [](nb::handle h) { return nb::isinstance<nb::int_>(h); });
+    m.def("is_struct", [](nb::handle h) { return nb::isinstance<Struct>(h); });
+
+    struct Base { ~Base() = default; };
+    struct PolymorphicBase { virtual ~PolymorphicBase() = default; };
+    struct Subclass : Base { };
+    struct PolymorphicSubclass : PolymorphicBase { };
+    struct AnotherSubclass : Base { };
+    struct AnotherPolymorphicSubclass : PolymorphicBase { };
+
+    nb::class_<Base> (m, "Base");
+    nb::class_<Subclass> (m, "Subclass");
+    nb::class_<PolymorphicBase> (m, "PolymorphicBase");
+    nb::class_<PolymorphicSubclass> (m, "PolymorphicSubclass");
+
+    m.def("polymorphic_factory", []() { return (PolymorphicBase *) new PolymorphicSubclass(); });
+    m.def("polymorphic_factory_2", []() { return (PolymorphicBase *) new AnotherPolymorphicSubclass(); });
+    m.def("factory", []() { return (Base *) new Subclass(); });
+    m.def("factory_2", []() { return (Base *) new AnotherSubclass(); });
 }

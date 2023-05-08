@@ -13,6 +13,34 @@
 #include <memory>
 
 NAMESPACE_BEGIN(NB_NAMESPACE)
+
+// Deleter for std::unique_ptr<T> (handles ownership by both C++ and Python)
+template <typename T> struct deleter {
+    /// Instance should be cleared using a delete expression
+    deleter()  = default;
+
+    /// Instance owned by Python, reduce reference count upon deletion
+    deleter(handle h) : o(h.ptr()) { }
+
+    /// Does Python own storage of the underlying object
+    bool owned_by_python() const { return o != nullptr; }
+
+    /// Does C++ own storage of the underlying object
+    bool owned_by_cpp() const { return o == nullptr; }
+
+    /// Perform the requested deletion operation
+    void operator()(void *p) noexcept {
+        if (o) {
+            gil_scoped_acquire guard;
+            Py_DECREF(o);
+        } else {
+            delete (T *) p;
+        }
+    }
+
+    PyObject *o{nullptr};
+};
+
 NAMESPACE_BEGIN(detail)
 
 template <typename T, typename Deleter>
@@ -68,8 +96,23 @@ struct type_caster<std::unique_ptr<T, Deleter>> {
         if constexpr (IsNanobindDeleter)
             cpp_delete = value.get_deleter().owned_by_cpp();
 
-        handle result =
-            nb_type_put_unique(&typeid(T), value.get(), cleanup, cpp_delete);
+        T *ptr = value.get();
+        const std::type_info *type = &typeid(T);
+
+        constexpr bool has_type_hook =
+            !std::is_base_of_v<std::false_type, type_hook<T>>;
+        if constexpr (has_type_hook)
+            type = type_hook<T>::get(ptr);
+
+        handle result;
+        if constexpr (!std::is_polymorphic_v<T>) {
+            result = nb_type_put_unique(type, ptr, cleanup, cpp_delete);
+        } else {
+            const std::type_info *type_p =
+                (!has_type_hook && ptr) ? &typeid(*ptr) : nullptr;
+
+            result = nb_type_put_unique_p(type, type_p, ptr, cleanup, cpp_delete);
+        }
 
         if (result.is_valid()) {
             if (cpp_delete)

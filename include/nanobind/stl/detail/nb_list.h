@@ -1,5 +1,5 @@
 /*
-    nanobind/stl/details/nb_list.h: base class of list casters
+    nanobind/stl/detail/nb_list.h: base class of list casters
 
     Copyright (c) 2022 Wenzel Jakob
 
@@ -63,7 +63,7 @@ template <typename Value_, typename Entry> struct list_caster {
                 handle h = Caster::from_cpp(forward_like<T>(value), policy, cleanup);
 
                 if (!h.is_valid()) {
-                    ret.clear();
+                    ret.reset();
                     break;
                 }
 
