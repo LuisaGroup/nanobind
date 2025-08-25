@@ -56,7 +56,7 @@ To avoid this problem, we can
 
 1. **Provide more information**: the problem was that nanobind *incorrectly*
    transferred ownership of a C++ instance to the Python side. To fix this, we
-   can add add a :ref:`return value policy <rvp>` annotation that clarifies
+   can add a :ref:`return value policy <rvp>` annotation that clarifies
    what to do with the return value.
 
 2. **Make ownership transfer explicit**: C++ types passed via :ref:`unique
@@ -76,7 +76,7 @@ The remainder of this section goes through each of these options.
 Return value policies
 ---------------------
 
-nanobind provides a several *return value policy* annotations that can be
+nanobind provides several *return value policy* annotations that can be
 passed to :func:`module_::def`, :func:`class_::def`, and :func:`cpp_function`.
 The default policy is :cpp:enumerator:`rv_policy::automatic`, which is usually
 a reasonable default (but not in this case!).
@@ -167,8 +167,8 @@ options below. In particular, the following policies are available:
 
   This return value policy is *dangerous* and should be used cautiously.
   Undefined behavior will ensue when the C++ side deletes the instance while it
-  is still being used by Python. If need to use this policy, combine it with a
-  :cpp:struct:`keep_alive` function binding annotation to manage the lifetime.
+  is still being used by Python. If you need to use this policy, combine it with
+  a :cpp:struct:`keep_alive` function binding annotation to manage the lifetime.
   Or use the simple and safe :cpp:enumerator:`reference_internal
   <rv_policy::reference_internal>` alternative described next.
 
@@ -182,7 +182,7 @@ options below. In particular, the following policies are available:
      m.def("get_data", []{ return &data; }, nb::rv_policy::reference)
 
 - :cpp:enumerator:`rv_policy::reference_internal`: A policy for *methods* that
-  expose an internal field. The lifetime of the field must matches that of the
+  expose an internal field. The lifetime of the field must match that of the
   parent object.
 
   The policy resembles :cpp:enumerator:`reference <rv_policy::reference>` in
@@ -190,7 +190,7 @@ options below. In particular, the following policies are available:
   field without making a copy, and without transferring ownership to Python.
 
   Furthermore, it ensures that the instance owning the field (implicit
-  ``this``/``self`` argument) cannot be not garbage collected while an object
+  ``this``/``self`` argument) cannot be garbage collected while an object
   representing the field is alive.
 
   The example below uses this policy to implement a *getter* that permits
@@ -330,12 +330,30 @@ nanobind's support for shared pointers requires an extra include directive:
 You don't need to specify a return value policy annotation when a function
 returns a shared pointer.
 
-Shared pointer support has one major limitation in nanobind: the
-``std::enable_shared_from_this<T>`` base class that normally enables safe
-conversion of raw pointers to the associated shared pointer *may not be used*.
-Further detail can be found in the *advanced* :ref:`section <shared_ptr_adv>`
-on object ownership. If you need this feature, switch to intrusive reference
-counting explained below.
+nanobind's implementation of ``std::shared_ptr`` support typically
+allocates a new ``shared_ptr`` control block each time a Python object
+must be converted to ``std::shared_ptr<T>``. The new ``shared_ptr``
+"owns" a reference to the Python object, and its deleter drops that
+reference.  This has the advantage that the Python portion of the
+object will be kept alive by its C++-side references (which is
+important when implementing C++ virtual methods in Python), but it can
+be inefficient when passing the same object back and forth between
+Python and C++ many times, and it means that the ``use_count()``
+method of ``std::shared_ptr`` will return a value that does not
+capture all uses. Some of these problems can be mitigated by modifying
+``T`` so that it inherits from ``std::enable_shared_from_this<T>``.
+See the :ref:`advanced section <shared_ptr_adv>` on object ownership
+for more details on the implementation.
+
+nanobind has limited support for objects that inherit from
+``std::enable_shared_from_this<T>`` to allow safe conversion of raw
+pointers to shared pointers. The safest way to deal with these objects
+is to always use ``std::make_shared<T>(...)`` when constructing them in C++,
+and always pass them across the Python/C++ boundary wrapped in an explicit
+``std::shared_ptr<T>``. If you do this, then there shouldn't be any
+surprises. If you will be passing raw ``T*`` pointers around, then
+read the :ref:`advanced section on object ownership <enable_shared_from_this>`
+for additional caveats.
 
 .. _intrusive_intro:
 
@@ -346,9 +364,9 @@ Intrusive reference counting is the most flexible and efficient way of handling
 shared ownership. The main downside is that you must adapt the base class of
 your object hierarchy to the needs of nanobind.
 
-The core idea is to define base class (e.g. ``Object``) that is common to all bound
-types requiring shared ownership. That class contains a builtin
-atomic counter to keep track of the number of outstanding references. 
+The core idea is to define base class (e.g. ``Object``) common to all bound
+types requiring shared ownership. That class contains a builtin atomic counter
+(e.g., ``m_ref_count``) and a Python object pointer (e.g., ``m_py_object``).
 
 .. code-block:: cpp
 
@@ -356,9 +374,27 @@ atomic counter to keep track of the number of outstanding references.
    ...
    private:
        mutable std::atomic<size_t> m_ref_count { 0 };
+       PyObject *m_py_object = nullptr;
    };
 
-With a few extra modifications, nanobind can unify this reference count so that
-it accounts for references in both languages. Please see the :ref:`detailed
-section on intrusive reference counting <intrusive>` for a concrete example on
-how to set this up.
+The core idea is that such ``Object`` instances can either be managed by C++ or
+Python. In the former case, the ``m_ref_count`` field keeps track of the number
+of outstanding references. In the latter case, reference counting is handled by
+Python, and the ``m_ref_count`` field remains unused.
+
+This is actually little wasteful---nanobind therefore ships with a more
+efficient reference counter sample implementation that supports both use cases
+while requiring only ``sizeof(void*)`` bytes of storage:
+
+.. code-block:: cpp
+
+   #include <nanobind/intrusive/counter.h>
+
+   class Object {
+   ...
+   private:
+       intrusive_counter m_ref_count;
+   };
+
+Please read the dedicated :ref:`section on intrusive reference counting
+<intrusive>` for more details on how to set this up.

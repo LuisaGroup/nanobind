@@ -1,6 +1,7 @@
 import pytest
+import platform
 
-import test_bind_vector_ext as t
+import test_stl_bind_vector_ext as t
 
 def test01_vector_int(capfd):
     v_int = t.VectorInt([0, 0])
@@ -10,11 +11,13 @@ def test01_vector_int(capfd):
     # test construction from a generator
     v_int1 = t.VectorInt(x for x in range(5))
     assert t.VectorInt(v_int1) == t.VectorInt([0, 1, 2, 3, 4])
-    assert repr(v_int1) == "test_bind_vector_ext.VectorInt([0, 1, 2, 3, 4])"
+    assert repr(v_int1) == "test_stl_bind_vector_ext.VectorInt([0, 1, 2, 3, 4])"
 
     v_int2 = t.VectorInt([0, 0])
     assert v_int == v_int2
-    v_int2[1] = 1
+    v_int2[1] = 2
+    v_int2[1] -= 1
+    assert v_int2[1] == 1
     assert v_int != v_int2
 
     v_int2.append(2)
@@ -43,8 +46,14 @@ def test01_vector_int(capfd):
     with pytest.raises(TypeError):
         v_int2.extend([8, "a"])
 
-    captured = capfd.readouterr()
-    assert captured.err.strip() == "nanobind: implicit conversion from type 'list' to type 'test_bind_vector_ext.VectorInt' failed!"
+    captured = capfd.readouterr().err.strip()
+    ref = "nanobind: implicit conversion from type 'list' to type 'test_stl_bind_vector_ext.VectorInt' failed!"
+
+    # Work around Pytest-related flakiness (https://github.com/pytest-dev/pytest/issues/10843)
+    if platform.system() == 'Windows':
+        assert captured == ref or captured == ''
+    else:
+        assert captured == ref
 
     assert v_int2 == t.VectorInt([0, 99, 2, 3, 4, 5, 6, 7])
 
@@ -103,15 +112,7 @@ def test03_vector_custom():
     assert len(v_b) == 2 and v_b[0].a == 1 and v_b[1].a == 2
 
 
-def test04_vector_noncopyable():
-    vnc = t.get_vnc(5)
-    for i in range(0, 5):
-        assert vnc[i].value == i + 1
-
-    for i, j in enumerate(vnc, start=1):
-        assert j.value == i
-
-def test05_vector_slicing():
+def test04_vector_slicing():
     l1 = list(range(100))
     l2 = t.VectorInt(l1)
 
@@ -138,3 +139,50 @@ def test05_vector_slicing():
     check_del(slice(200, 10, 1))
     check_del(slice(200, 10, -1))
     check_del(slice(200, 10, -3))
+
+
+def test05_vector_non_shared():
+    v = t.VectorEl()
+    v.append(t.El(1))
+    v.append(t.El(2))
+
+    v0, v1 = v[0], v[1]
+    v0.a, v1.a = 100, 200
+
+    assert v[0].a == 1
+    assert v[1].a == 2
+
+    # Check that elements accessed through the iterator *cannot* be modified
+    q = next(iter(v))
+    q.a = 5
+    assert v[0].a == 1
+
+def test06_vector_shared():
+    v = t.VectorElShared()
+    v.append(t.El(1))
+    v.append(t.El(2))
+
+    v0, v1 = v[0], v[1]
+    v0.a, v1.a = 100, 200
+
+    assert v[0].a == 100
+    assert v[1].a == 200
+
+    # Check that elements accessed through the iterator *can* be modified
+    q = next(iter(v))
+    q.a = 5
+    assert v[0].a == 5
+
+
+def test07_vector_noncopyable():
+    vnc = t.get_vnc(5)
+    for i in range(0, 5):
+        assert vnc[i].value == i + 1
+
+    for i, j in enumerate(vnc, start=1):
+        assert j.value == i
+
+    # Check that elements accessed through the iterator *can* be modified
+    q = next(iter(vnc))
+    q.value = 5
+    assert vnc[0].value == 5

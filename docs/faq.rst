@@ -84,6 +84,11 @@ other types when they are handled using :ref:`type casters <type_casters>`.
 Please read the full section on :ref:`information exchange between C++ and
 Python <exchange>` to understand the issue and alternatives.
 
+Why am I getting errors about leaked instances/functions/types?
+---------------------------------------------------------------
+
+Please see the dedicated documentation section on :ref:`reference leaks <refleaks>`.
+
 Compilation fails with a static assertion mentioning ``NB_MAKE_OPAQUE()``
 -------------------------------------------------------------------------
 
@@ -213,16 +218,6 @@ the following example:
         m.def("sub", [](int a, int b) { return a - b; });
     }
 
-:command:`python`:
-
-.. code-block:: pycon
-
-    >>> import example
-    >>> example.add(1, 2)
-    3
-    >>> example.sub(1, 1)
-    0
-
 As shown above, the various ``init_ex`` functions should be contained in
 separate files that can be compiled independently from one another, and then
 linked together into the same final shared object.  Following this approach
@@ -236,6 +231,157 @@ will:
    definition is changed, only a subset of the binding code will generally need
    to be recompiled.
 
+.. _type-visibility:
+
+How can I avoid conflicts with other projects using nanobind?
+-------------------------------------------------------------
+
+Suppose that a type binding in your project conflicts with another extension, for
+example because both expose a common type (e.g., ``std::latch``). nanobind will
+warn whenever it detects such a conflict:
+
+.. code-block:: text
+
+  RuntimeWarning: nanobind: type 'latch' was already registered!
+
+In the worst case, this could actually break both packages (especially if the
+bindings of the two packages expose an inconsistent/incompatible API).
+
+The higher-level issue here is that nanobind will by default try to make type
+bindings visible across extensions because this is helpful to partition large
+binding projects into smaller parts. Such information exchange requires that
+the extensions:
+
+- use the same nanobind *ABI version* (see the :ref:`Changelog <changelog>` for details).
+- use the same compiler (extensions built with GCC and Clang are isolated from each other).
+- use ABI-compatible versions of the C++ library.
+- use the stable ABI interface consistently (stable and unstable builds are isolated from each other).
+- use debug/release mode consistently (debug and release builds are isolated from each other).
+
+In addition, nanobind provides a feature to intentionally scope extensions to a
+named domain to avoid conflicts with other extensions. To do so, specify the
+``NB_DOMAIN`` parameter in CMake:
+
+.. code-block:: cmake
+
+   nanobind_add_module(my_ext
+                       NB_DOMAIN my_project
+                       my_ext.cpp)
+
+In this case, inter-extension type visibility is furthermore restricted to
+extensions in the ``"my_project"`` domain.
+
+Can I use nanobind without RTTI or C++ exceptions?
+--------------------------------------------------
+
+Certain environments (e.g., `Google-internal development
+<https://google.github.io/styleguide/cppguide.html>`__, embedded devices, etc.)
+require compilation without C++ runtime type information (``-fno-rtti``) and
+exceptions (``-fno-exceptions``).
+
+nanobind requires both of these features and cannot be used when they are not
+available. RTTI provides the central index to look up types of bindings.
+Exceptions are needed because Python relies on exceptions that must be
+converted into something equivalent on the C++ side. PRs that refactor nanobind
+to work without RTTI or exceptions will not be accepted.
+
+For Googlers: there is already an exemption from the internal rules that
+specifically permits the use of RTTI/exceptions when a project relies on
+pybind11. Likely, this exemption could be extended to include nanobind as well.
+
+Can I make stable ABI extensions for pre-3.12 Python?
+-----------------------------------------------------
+
+Stable ABI extensions are convenient because they can be reused across Python
+versions, but this unfortunately only works on Python 3.12 and newer. Nanobind
+crucially depends on several `features
+<https://docs.python.org/3/whatsnew/3.12.html#c-api-changes>`__ that were added
+in version 3.12 (specifically, ``PyType_FromMetaclass()`` and limited API
+bindings of the vector call protocol).
+
+Policy on Clang-Tidy, ``-Wpedantic``, etc.
+------------------------------------------
+
+nanobind regularly receives requests from users who run it through Clang-Tidy,
+or who compile with increased warnings levels, like ``-Wpedantic``,
+``-Wcast-qual``, ``-Wsign-conversion``, etc. (i.e., beyond the increased
+``-Wall``, ``-Wextra`` and ``/W4`` warning levels that are already enabled)
+
+Their next step is to open a big pull request needed to silence all of the
+resulting messages.
+
+My policy on this is as follows: I am always happy to fix issues in the
+codebase. However, many of the resulting change requests are in the "ritual
+purification" category: things that cause churn, decrease readability, and
+which don't fix actual problems. It's a never-ending cycle because each new
+revision of such tooling adds further warnings and purification rites.
+
+So just to have a clear policy: I do not wish to pepper this codebase with
+``const_cast`` and ``#pragmas`` or pragma-like comments to avoid warnings in
+various kinds of external tooling just so those users can have a "silent"
+build. I don't think it is reasonable for them to impose their own style on
+this project.
+
+As a workaround it is likely possible to restrict the scope of style checks to
+particular C++ namespaces or source code locations.
+
+I'd like to use this project, but with $BUILD_SYSTEM instead of CMake
+---------------------------------------------------------------------
+
+A difficult aspect of C++ software development is the sheer number of competing
+build systems, including
+
+- `CMake <https://cmake.org>`__,
+- `Meson <https://mesonbuild.com>`__,
+- `xmake <https://xmake.io/#/>`__,
+- `Premake <https://premake.github.io>`__,
+- `Bazel <https://bazel.build>`__,
+- `Conan <https://docs.conan.io/2/>`__,
+- `Autotools <https://www.gnu.org/software/automake>`__,
+- and many others.
+
+The author of this project has some familiarity with CMake but lacks expertise
+with this large space of alternative tools. Maintaining and shipping support for
+other build systems is therefore considered beyond the scope of this *nano*
+project (see also the :ref:`why? <why>` part of the documentation that explains
+the rationale for being somewhat restrictive towards external contributions).
+
+If you wish to create and maintain an alternative interface to nanobind, then
+my request would be that you create and maintain separate repository (see,
+e.g., `pybind11_bazel <https://github.com/pybind/pybind11_bazel>`__ as an
+example how how this was handled in the case of pybind11). Please carefully
+review the file `nanobind-config.cmake
+<https://github.com/wjakob/nanobind/blob/master/cmake/nanobind-config.cmake>`__.
+Besides getting things to compile, it specifies a number of platform-dependent
+compiler and linker options that are needed to produce *optimal* (small and
+efficient) binaries. Nanobind uses a `complicated and non-standard
+<https://github.com/wjakob/nanobind/commit/2f29ec7d5fbebd5f55fb52da297c8d197279f659>`__
+set of linker parameters on macOS, which is the result of a `lengthy
+investigation
+<https://github.com/python/cpython/issues/97524#issuecomment-1458855301>`__.
+Other parameters like linker-level dead code elimination and size-based
+optimization were similarly added following careful analysis. The CMake build
+system provides the ability to compile ``libnanobind`` into either a shared or
+a static library, to optionally target the stable ABI, and to isolate it from
+other extensions via the ``NB_DOMAIN`` parameter. All of these are features
+that would be nice to retain in an alternative build system. If you've made a
+build system compatible with another tool that is sufficiently
+feature-complete, then please file an issue and I am happy to reference it in
+the documentation.
+
+Are there tools to generate nanobind bindings automatically?
+------------------------------------------------------------
+
+`litgen <https://pthom.github.io/litgen>`__ is an automatic Python bindings
+generator compatible with both pybind11 and nanobind, designed to create
+documented and easily discoverable bindings.
+It reproduces header documentation directly in the bindings, making the
+generated API intuitive and well-documented for Python users.
+Powered by srcML (srcml.org), a high-performance, multi-language parsing tool,
+litgen takes a developer-centric approach.
+The C++ API to be exposed to Python must be C++14 compatible, although the
+implementation can leverage more modern C++ features.
+
 How to cite this project?
 -------------------------
 
@@ -248,5 +394,5 @@ discourse:
        author = {Wenzel Jakob},
        year = {2022},
        note = {https://github.com/wjakob/nanobind},
-       title = {nanobind---Seamless operability between C++17 and Python}
+       title = {nanobind: tiny and efficient C++/Python bindings}
     }

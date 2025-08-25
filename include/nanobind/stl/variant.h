@@ -22,65 +22,77 @@ struct concat_variant<std::variant<Ts1...>, std::variant<Ts2...>, Ts3...>
     : concat_variant<std::variant<Ts1..., Ts2...>, Ts3...> {};
 
 template <typename... Ts> struct remove_opt_mono<std::variant<Ts...>>
-    : concat_variant<std::conditional_t<std::is_same_v<std::monostate, Ts>, std::variant<>, std::variant<Ts>>...> {};
+    : concat_variant<std::conditional_t<std::is_same_v<std::monostate, Ts>, std::variant<>, std::variant<remove_opt_mono_t<Ts>>>...> {};
 
-template <>
-struct type_caster<std::monostate> {
-    NB_TYPE_CASTER(std::monostate, const_name("None"));
+template <> struct type_caster<std::monostate> : none_caster<std::monostate> { };
 
-    bool from_python(handle src, uint8_t, cleanup_list *) noexcept {
-        if (src.is_none())
-            return true;
-        return false;
-    }
+template <bool Defaultable, typename... Ts>
+struct variant_caster_storage;
 
-    static handle from_cpp(const std::monostate &, rv_policy,
-                           cleanup_list *) noexcept {
-        return none().release();
-    }
+template <typename... Ts>
+struct variant_caster_storage<true, Ts...> {
+    using Variant = std::variant<Ts...>;
+    Variant value;
+    Variant& get() { return value; }
+    template <typename T>
+    void store(T&& alternative) { value = (forward_t<T>) alternative; }
 };
 
 template <typename... Ts>
-class type_caster<std::variant<Ts...>> {
-    template <typename T> using Caster = make_caster<detail::intrinsic_t<T>>;
+struct variant_caster_storage<false, Ts...> {
+    using Variant = std::variant<Ts...>;
+    std::variant<std::monostate, Variant> value;
+    Variant& get() { return *std::get_if<1>(&value); }
+    template <typename T>
+    void store(T&& alternative) {
+        value.template emplace<1>((forward_t<T>) alternative);
+    }
+};
+
+template <typename T1, typename... Ts>
+constexpr bool variant_is_defaultable = std::is_default_constructible_v<T1>;
+
+template <typename... Ts>
+struct type_caster<std::variant<Ts...>>
+  : private variant_caster_storage<variant_is_defaultable<Ts...>, Ts...> {
+    // We don't use NB_TYPE_CASTER so that we can customize the cast operators
+    // to use `variant_caster_storage`, in order to support variants that are
+    // not default-constructible.
+    using Value = std::variant<Ts...>;
+    static constexpr auto Name = union_name(make_caster<Ts>::Name...);
+
+    template <typename T> using Cast = movable_cast_t<T>;
+    template <typename T> static constexpr bool can_cast() { return true; }
+    explicit operator Value*() { return &this->get(); }
+    explicit operator Value&() { return (Value &) this->get(); }
+    explicit operator Value&&() { return (Value &&) this->get(); }
 
     template <typename T>
-    bool variadic_caster(const handle &src, uint8_t flags, cleanup_list *cleanup) {
-        Caster<T> caster;
-        if (!caster.from_python(src, flags, cleanup))
+    bool try_variant(const handle &src, uint8_t flags, cleanup_list *cleanup) {
+        using CasterT = make_caster<T>;
+
+        CasterT caster;
+
+        if (!caster.from_python(src, flags_for_local_caster<T>(flags), cleanup) ||
+            !caster.template can_cast<T>())
             return false;
 
-        if constexpr (is_pointer_v<T>) {
-            static_assert(Caster<T>::IsClass,
-                          "Binding 'variant<T*,...>' requires that 'T' can also be bound by nanobind.");
-            value = caster.operator cast_t<T>();
-        } else if constexpr (Caster<T>::IsClass) {
-            // Non-pointer classes do not accept a null pointer
-            if (src.is_none())
-                return false;
-            value = caster.operator cast_t<T &>();
-        } else {
-            value = std::move(caster).operator cast_t<T &&>();
-        }
+        this->store(caster.operator cast_t<T>());
+
         return true;
     }
 
-public:
-    using Value = std::variant<Ts...>;
-
-    static constexpr auto Name = const_name("Union[") + concat(Caster<Ts>::Name...) + const_name("]");
-    static constexpr bool IsClass = false;
-
-    template <typename T> using Cast = movable_cast_t<T>;
-
-    Value value;
-
     bool from_python(handle src, uint8_t flags, cleanup_list *cleanup) noexcept {
-        return (variadic_caster<Ts>(src, flags, cleanup) || ...);
+        if (flags & (uint8_t) cast_flags::convert) {
+            if ((try_variant<Ts>(src, flags & ~(uint8_t)cast_flags::convert, cleanup) || ...)){
+                return true;
+            }
+        }
+        return (try_variant<Ts>(src, flags, cleanup) || ...);
     }
 
     template <typename T>
-    static handle from_cpp(T *value, rv_policy policy, cleanup_list *cleanup) noexcept {
+    static handle from_cpp(T *value, rv_policy policy, cleanup_list *cleanup) {
         if (!value)
             return none().release();
         return from_cpp(*value, policy, cleanup);
@@ -88,14 +100,13 @@ public:
 
     template <typename T>
     static handle from_cpp(T &&value, rv_policy policy, cleanup_list *cleanup) noexcept {
-        return std::visit([&](auto &&v) {
-                return Caster<decltype(v)>::from_cpp(std::forward<decltype(v)>(v), policy, cleanup);
-            }, std::forward<T>(value));
+        return std::visit(
+            [&](auto &&v) {
+                return make_caster<decltype(v)>::from_cpp(
+                    std::forward<decltype(v)>(v), policy, cleanup);
+            },
+            std::forward<T>(value));
     }
-
-    explicit operator Value *() { return &value; }
-    explicit operator Value &() { return value; }
-    explicit operator Value &&() && { return (Value &&) value; }
 };
 
 NAMESPACE_END(detail)

@@ -132,16 +132,22 @@ both of the following include directives to your code:
 .. code-block:: cpp
 
    #include <nanobind/stl/unique_ptr.h>
-   #include <nanobind/stl/unique_shared_ptr.h>
+   #include <nanobind/stl/shared_ptr.h>
 
 Binding functions that take ``std::unique_ptr<T>`` arguments involves some
 limitations that can be avoided by changing their signatures to
 ``std::unique_ptr<T, nb::deleter<T>>`` (:ref:`details <unique_ptr>`).
 
-Usage of ``std::enable_shared_from_this<T>`` is **prohibited** and will raise a
-compile-time assertion (:ref:`details <enable_shared_from_this>`) . This is
-consistent with the philosophy of this library: *the codebase has to adapt to
-the binding tool and not the other way around*.
+Use of ``std::enable_shared_from_this<T>`` is permitted, but since
+nanobind does not use holder types, an object
+constructed in Python will typically not have any associated
+``std::shared_ptr<T>`` until it is passed to a C++ function that
+accepts ``std::shared_ptr<T>``. That means a C++ function that accepts
+a raw ``T*`` and calls ``shared_from_this()`` on it might stop working
+when ported from pybind11 to nanobind. You can solve this problem
+by always passing such objects across the Python/C++ boundary as
+``std::shared_ptr<T>`` rather than as ``T*``. See the :ref:`advanced section
+on object ownership <enable_shared_from_this>` for more details.
 
 Custom constructors
 -------------------
@@ -151,8 +157,8 @@ the desired type.
 
 .. code-block:: cpp
 
-   nb::class_<MyType>(m, "MyType")
-       .def(nb::init([](int) { return MyType(...); }));
+   py::class_<MyType>(m, "MyType")
+       .def(py::init([](int) { return MyType(...); }));
 
 Unfortunately, the implementation of this feature was quite complex and
 often required further internal calls to the move or copy
@@ -171,6 +177,15 @@ with the Python object for reasons of efficiency). The lambda function can
 then either run an in-place constructor and return normally (in which case
 the instance is assumed to be correctly constructed) or fail by raising an
 exception.
+
+To turn an existing factory function into a constructor, you will need to
+combine the above pattern with an invocation of the move/copy-constructor,
+e.g.:
+
+.. code-block:: cpp
+
+   nb::class_<MyType>(m, "MyType")
+       .def("__init__", [](MyType *t) { new (t) MyType(MyType::create()); });
 
 Implicit conversions
 --------------------
@@ -235,11 +250,11 @@ Iterator bindings
 
 Use of the :cpp:func:`nb::make_iterator() <make_iterator>`,
 :cpp:func:`nb::make_key_iterator() <make_key_iterator>`, and
-:cpp:func:`nb::make_value_iterator() <make_value_iterator>` requires including
-the additional header file ``nanobind/make_iterator.h``. The interface of these
-functions has also slightly changed: all take a Python scope and a name as
-first and second arguments, which are used to permanently "install" the
-iterator type (which is created on demand). See the `test suite
+:cpp:func:`nb::make_value_iterator() <make_value_iterator>` functions requires
+including the additional header file ``nanobind/make_iterator.h``. The
+interface of these functions has also slightly changed: all take a Python scope
+and a name as first and second arguments, which are used to permanently
+"install" the iterator type (which is created on demand). See the `test suite
 <https://github.com/wjakob/nanobind/blob/master/tests/test_make_iterator.cpp>`_
 for a worked out example.
 
@@ -267,17 +282,31 @@ changes are needed:
   a Python exception, the function should *leave the error set* (note the
   asymmetry compared to ``from_python()``) and return ``nullptr``.
 
-Both functions must be marked as ``noexcept``.
-
 Note that the cleanup list is only available when ``from_python()`` or
 ``from_cpp()`` are called as part of function dispatch, while usage by
-:cpp:func:`nb::cast() <cast>` sets ``cleanup`` to ``nullptr``. This case should
-be handled gracefully by refusing the conversion if the cleanup list is
-absolutely required.
+:cpp:func:`nb::cast() <cast>` may set ``cleanup`` to ``nullptr`` if implicit
+conversions are not enabled. This case should be handled gracefully by refusing
+the conversion if the cleanup list is absolutely required.
+
+Type casters may not raise C++ exceptions. Both ``from_python()`` and
+``from_cpp()`` must be annotated with ``noexcept``. Exceptions or failure
+conditions caused by a conversion should instead be caught *within* the
+function body and handled as follows:
+
+- ``from_python()``: return ``false``. That's it. (Failed Python to C++
+  conversion occur all the time while dispatching calls, causing nanobind
+  to simply move to the next function overload. Dedicated error reporting would
+  add undesirable overheads). In case of a severe internal error, use the
+  CPython warning API (e.g., ``PyErr_Warn()``) to notify the user.
+
+- ``from_cpp()``: a failure here is more serious, since a return value of a
+  successfully evaluated cannot be converted, causing the call to fail. To
+  provide further detail, use the CPython error API (e.g., ``PyErr_Format()``)
+  and return an invalid handle (``return nb::handle();``).
 
 The ``std::pair<T1, T2>`` type caster (`link
 <https://github.com/wjakob/nanobind/blob/master/include/nanobind/stl/pair.h>`_)
-may be useful as a reference for these changes.
+may be useful as a starting point of custom implementations.
 
 .. _removed:
 
@@ -305,8 +334,10 @@ Removed features include:
   executable or run several independent Python interpreters in the same process
   is unsupported. Nanobind caters to bindings only. Multi-interpreter support
   would require TLS lookups for nanobind data structures, which is undesirable.
-- ○ **Function binding annotations**: the ``kw_only`` / ``pos_only`` argument
-  annotations were removed.
+- ○ **Function binding annotations**: The ``pos_only`` argument
+  annotation was removed. However, the same behavior can be achieved by
+  creating unnamed arguments; see the discussion in the section on
+  :ref:`keyword-only arguments <kw_only>`.
 - ○ **Metaclasses**: creating types with custom metaclasses is unsupported.
 - ○ **Module-local bindings**: support was removed (both for types and exceptions).
 - ○ **Custom allocation**: C++ classes with an overloaded or deleted ``operator
@@ -314,17 +345,14 @@ Removed features include:
 - ○ **Compilation**: workarounds for buggy or non-standard-compliant
   compilers were removed and will not be reintroduced.
 - ○ The ``options`` class for customizing docstring generation was removed.
-- ● NumPy integration was replaced by a more general
-  :cpp:class:`nb::ndarray\<..\> <nanobind::ndarray>` integration that supports
-  CPU/GPU tensors produced by various frameworks (NumPy, PyTorch,
-  TensorFlow, JAX, ..).
-- ● Buffer protocol functionality (``.def_buffer()``) was removed in favor of
-  the :cpp:class:`nb::ndarray\<..\> <nanobind::ndarray>` interface.
-- ● Nested exceptions are not supported.
-- ● Features to facilitate pickling and unpickling were removed.
-- ● Support for evaluating Python code strings was removed.
-- ● Type casters for time/date conversion (``pybind11/chrono.h``) haven't been
-  ported yet.
+- ○ The NumPy array class (``py::array``) was removed in exchange for a more
+  powerful alternative (:cpp:class:`nb::ndarray\<..\> <nanobind::ndarray>`)
+  that additionally supports CPU/GPU tensors produced by various frameworks
+  (NumPy, PyTorch, TensorFlow, JAX, etc.). Its API is not compatible with
+  pybind11, however.
+- ● Buffer protocol binding (``.def_buffer()``) was removed in favor of
+  :cpp:class:`nb::ndarray\<..\> <nanobind::ndarray>`.
+- ● Support for evaluating Python files was removed.
 
 Bullet points marked with ● may be reintroduced eventually, but this will
 need to be done in a careful opt-in manner that does not affect code

@@ -8,6 +8,24 @@ modules. This is needed because quite a few steps are involved: nanobind must
 build the module, a library component, link the two together, and add a
 different set of compilation and linker flags depending on the target platform.
 
+If you prefer another build system, then you have the following options:
+
+- `Nicholas Junge <https://github.com/nicholasjng>`__ has created a `Bazel
+  interface <https://github.com/nicholasjng/nanobind-Bazel>`__ to nanobind.
+  Please report Bazel-specific issues there.
+
+- `Will Ayd <https://github.com/WillAyd/>`__ has created a `Meson WrapDB
+  package <https://mesonbuild.com/Wrapdb-projects.html>`__ for nanobind. Please
+  report Meson-specific issues on the `Meson WrapDB
+  <https://github.com/mesonbuild/wrapdb/issues>`__ repository.
+
+- You could create a new build system from scratch that takes care of these
+  steps. See `this file
+  <https://github.com/wjakob/nanobind/blob/master/src/nb_combined.cpp>`__ for
+  inspiration on how to do this on Linux. Note that you will be on your own if
+  you choose to go this route---I unfortunately do not have the time to respond
+  to GitHub tickets related to custom build systems.
+
 The section on :ref:`building extensions <building>` provided an introductory
 example of how to set up a basic build system via the
 :cmake:command:`nanobind_add_module` command, which is the :ref:`high level
@@ -16,6 +34,11 @@ somewhat opinionated, however. For this reason, nanobind also provides an
 alternative :ref:`low level <lowlevel-cmake>` interface that decomposes it into
 smaller steps.
 
+A later part of this section explains how a Git submodule dependency can be
+:ref:`avoided <submodule_deps>` in exchange for a system-provided package.
+
+Finally, the section ends with an explanation of the CMake convenience
+interface for :ref:`stub generation <stub_generation_cmake>`.
 
 .. _highlevel-cmake:
 
@@ -31,9 +54,9 @@ The high-level interface consists of just one CMake command:
 
    .. code-block:: cmake
 
-      nanobind_build_library(
+      nanobind_add_module(
         my_ext                   # Target name
-        NB_STATIC STABLE_API LTO # Optional flags (see below)
+        NB_STATIC STABLE_ABI LTO # Optional flags (see below)
         my_ext.h                 # Source code files below
         my_ext.cpp)
 
@@ -43,16 +66,30 @@ The high-level interface consists of just one CMake command:
 
       * - ``STABLE_ABI``
         - Perform a `stable ABI
-          <https://docs.python.org/3/c-api/stable.html>`_ build, making it
+          <https://docs.python.org/3/c-api/stable.html>`__ build, making it
           possible to use a compiled extension across Python minor versions.
-          Only Python >= 3.12 is supported. The flag is ignored on older
+          The flag is ignored on Python versions older than < 3.12.
+      * - ``FREE_THREADED``
+        - Compile an Python extension that opts into free-threaded (i.e.,
+          GIL-less) Python behavior, which requires a special free-threaded
+          build of Python 3.13 or newer. The flag is ignored on unsupported
           Python versions.
-      * - ``NB_SHARED``
-        - Compile the core nanobind library as a shared library (the default).
       * - ``NB_STATIC``
         - Compile the core nanobind library as a static library. This
-          simplifies redistribution but unnecessarily increases the binary
-          storage footprint when a project contains many Python extensions.
+          simplifies redistribution but can increase the combined binary
+          storage footprint when a project contains many Python extensions
+          (this is the default).
+      * - ``NB_SHARED``
+        - The opposite of ``NB_STATIC``: compile the core nanobind library
+          as a shared library for use in projects that consist of multiple
+          extensions.
+      * - ``NB_SUPPRESS_WARNINGS``
+        - Mark the include directories of nanobind and Python as
+          `SYSTEM <https://cmake.org/cmake/help/latest/command/include_directories.html>`__
+          include directories, which suppresses any potential warning messages
+          originating there. This is mainly of relevance if your project artificially
+          raises the warning level via flags like ``-pedantic``, ``-Wcast-qual``,
+          ``-Wsign-conversion``.
       * - ``PROTECT_STACK``
         - Don't remove stack smashing-related protections.
       * - ``LTO``
@@ -62,6 +99,17 @@ The high-level interface consists of just one CMake command:
       * - ``NOSTRIP``
         - Don't strip unneded symbols and debug information from the compiled
           extension when performing release builds.
+      * - ``NB_DOMAIN <name>``
+        - Restrict the inter-extension type visibility to a named subdomain.
+          See the associated :ref:`FAQ entry <type-visibility>` for details.
+      * - ``MUSL_DYNAMIC_LIBCPP``
+        - When `cibuildwheel
+          <https://cibuildwheel.readthedocs.io/en/stable/>`__ is used to
+          produce `musllinux <https://peps.python.org/pep-0656/>`__ wheels,
+          don't statically link against ``libstdc++`` and ``libgcc`` (which is
+          an optimization that nanobind does by default in this specific case).
+          If this explanation sounds confusing, then you can ignore it. See the
+          detailed description below for more information on this step.
 
    :cmake:command:`nanobind_add_module` performs the following
    steps to produce bindings.
@@ -146,6 +194,25 @@ The high-level interface consists of just one CMake command:
      bottleneck. That said, the optional ``LTO`` argument can be specified to
      enable LTO in release builds.
 
+   - nanobind's CMake build system is often combined with `cibuildwheel
+     <https://cibuildwheel.readthedocs.io/en/stable/>`__ to automate the
+     generation of wheels for many different platforms. One such platform
+     called `musllinux <https://peps.python.org/pep-0656/>`__ exists to create
+     tiny self-contained binaries that are cheap to install in a container
+     environment (Docker, etc.). An issue of the combination with nanobind is
+     that ``musllinux`` doesn't include the ``libstdc++`` and ``libgcc``
+     libraries which nanobind depends on. ``cibuildwheel`` then has to ship
+     those along in each wheel, which actually increases their size rather
+     dramatically (by a factor of >5x for small projects). To avoid this,
+     nanobind prefers to link against these libraries *statically* when it
+     detects a ``cibuildwheel`` build targeting ``musllinux``. Pass the
+     ``MUSL_DYNAMIC_LIBCPP`` parameter to avoid this behavior.
+
+   - If desired (via the optional ``NB_DOMAIN`` parameter), nanobind will
+     restrict the visibility of symbols to a named subdomain to avoid conflicts
+     between bindings. See the associated :ref:`FAQ entry <type-visibility>`
+     for details.
+
 .. _lowlevel-cmake:
 
 Low-level interface
@@ -196,6 +263,9 @@ is equivalent to
     # .. set important linker flags
     nanobind_link_options(my_ext)
 
+    # Statically link against libstdc++/libgcc when targeting musllinux
+    nanobind_musl_static_libcpp(my_ext)
+
 The various commands are described below:
 
 .. cmake:command:: nanobind_build_library
@@ -209,21 +279,19 @@ The various commands are described below:
       :widths: 10 50
 
       * - ``-static``
-        - Perform a static library build (shared is the default).
+        - Perform a static library build (without this suffix, a shared build is used)
       * - ``-abi3``
-        - Perform a stable ABI build.
-      * - ``-lto``
-        - Use link time optimization when compiling for release mode. This
-          is done by default for shared builds, and the flag only controls
-          the behavior of static builds.
+        - Perform a stable ABI build targeting Python v3.12+.
+      * - ``-ft``
+        - Perform a build that opts into the Python 3.13+ free-threaded behavior.
 
    .. code-block:: cmake
 
       # Normal shared library build
       nanobind_build_library(nanobind)
 
-      # Static ABI3 build with LTO
-      nanobind_build_library(nanobind-static-abi3-lto)
+      # Static ABI3 build
+      nanobind_build_library(nanobind-static-abi3)
 
 .. cmake:command:: nanobind_opt_size
 
@@ -246,16 +314,6 @@ The various commands are described below:
       nanobind_trim(my_target)
 
    This substantially reduces the size of the generated binary.
-
-.. cmake:command:: nanobind_strip
-
-   This function strips unused and debug symbols in ``Release`` and
-   ``MinSizeRel`` builds on Linux and macOS. It expects a single target as
-   argument, as in
-
-   .. code-block:: cmake
-
-      nanobind_strip(my_target)
 
 .. cmake:command:: nanobind_strip
 
@@ -316,3 +374,118 @@ The various commands are described below:
    .. code-block:: cmake
 
       nanobind_link_options(my_target)
+
+.. cmake:command:: nanobind_musl_static_libcpp
+
+   This function passes the linker flags ``-static-libstdc++`` and
+   ``-static-libgcc`` to ``gcc`` when the environment variable
+   ``AUDITWHEEL_PLAT`` contains the string ``musllinux``, which indicates a
+   cibuildwheel build targeting that platform.
+
+   The function expects a single target as argument, as in
+
+   .. code-block:: cmake
+
+      nanobind_musl_static_libcpp(my_target)
+
+.. _submodule_deps:
+
+Submodule dependencies
+----------------------
+
+nanobind includes a dependency (a fast hash map named ``tsl::robin_map``) as a
+Git submodule. If you prefer to use another (e.g., system-provided) version of
+this dependency, set the ``NB_USE_SUBMODULE_DEPS`` variable before importing
+nanobind into CMake. In this case, nanobind's CMake scripts will internally
+invoke ``find_dependency(tsl-robin-map)`` to locate the associated header
+files.
+
+.. _stub_generation_cmake:
+
+Stub generation
+---------------
+
+Nanobind's CMake tooling includes a convenience command to interface with the
+``stubgen`` program explained in the section on :ref:`stub generation <stubs>`.
+
+.. cmake:command:: nanobind_add_stub
+
+   Import the specified module (``MODULE`` parameter), generate a stub, and
+   write it to the specified file (``OUTPUT`` parameter). Here is an example
+   use:
+
+   .. code-block:: cmake
+
+      nanobind_add_stub(
+          my_ext_stub
+          MODULE my_ext
+          OUTPUT my_ext.pyi
+          PYTHON_PATH $<TARGET_FILE_DIR:my_ext>
+          DEPENDS my_ext
+      )
+
+   The target name (``my_ext_stub`` in this example) must be unique but has no
+   other significance.
+
+   ``stubgen`` will add all paths specified as part of the ``PYTHON_PATH``
+   block and then execute ``import my_ext`` in a Python session. If the
+   extension is not importable, this will cause stub generation to fail.
+
+   This command supports the following parameters:
+
+   .. list-table::
+
+      * - ``INSTALL_TIME``
+        - By default, stub generation takes place at build time following
+          generation of all dependencies (see ``DEPENDS``). When this parameter
+          is specified, stub generation is instead postponed to the
+          installation phase.
+      * - ``MODULE``
+        - Specifies the name of the module that should be imported. Mandatory.
+      * - ``OUTPUT``
+        - Specifies the name of the stub file that should be written. The path
+          is relative to ``CMAKE_CURRENT_BINARY_DIR`` for build-time stub
+          generation and relative to ``CMAKE_INSTALL_PREFIX`` for install-time
+          stub generation. Mandatory.
+      * - ``PYTHON_PATH``
+        - List of search paths that should be considered when importing the
+          module. The paths are relative to ``CMAKE_CURRENT_BINARY_DIR`` for
+          build-time stub generation and relative to ``CMAKE_INSTALL_PREFIX``
+          for install-time stub generation. The current directory (``"."``) is
+          always included and does not need to be specified. The parameter may
+          contain CMake `generator expressions
+          <https://cmake.org/cmake/help/latest/manual/cmake-generator-expressions.7.html>`__
+          when :cmake:command:`nanobind_add_stub` is used for build-time stub
+          generation. Otherwise, generator expressions should not be used.
+          Optional.
+      * - ``DEPENDS``
+        - Any targets listed here will be marked as a dependencies. This should
+          generally be used to list the target names of one or more prior
+          :cmake:command:`nanobind_add_module` declarations. Note that this
+          parameter tracks *build-time* dependencies and does not need to be
+          specified when stub generation occurs at install time (see
+          ``INSTALL_TIME``). Optional.
+      * - ``VERBOSE``
+        - Show status messages generated by ``stubgen``.
+      * - ``EXCLUDE_DOCSTRINGS``
+        - Generate a stub containing only typed signatures without docstrings.
+      * - ``INCLUDE_PRIVATE``
+        - Also include private members, whose names begin or end with a single
+          underscore.
+      * - ``MARKER_FILE``
+        - Typed extensions normally identify themselves via the presence of an
+          empty file named ``py.typed`` in each module directory. When this
+          parameter is specified, :cmake:command:`nanobind_add_stub` will
+          automatically generate such an empty file as well.
+      * - ``PATTERN_FILE``
+        - Specify a pattern file used to replace declarations in the stub. The
+          syntax is described in the section on :ref:`stub generation <stubs>`.
+      * - ``COMPONENT``
+        - Specify a component when ``INSTALL_TIME`` stub generation is used.
+          This is analogous to ``install(..., COMPONENT [name])`` in other
+          install targets.
+      * - ``EXCLUDE_FROM_ALL``
+        - If specified, the file is only installed as part of a
+          component-specific installation when ``INSTALL_TIME`` stub generation
+          is used. This is analogous to ``install(..., EXCLUDE_FROM_ALL)`` in
+          other install targets.

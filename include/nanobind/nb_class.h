@@ -45,11 +45,27 @@ enum class type_flags : uint32_t {
     /// The class uses an intrusive reference counting approach
     intrusive_ptr            = (1 << 11),
 
-    /// Is this a trampoline class meant to be overloaded in Python?
-    is_trampoline            = (1 << 12),
+    /// Is this a class that inherits from enable_shared_from_this?
+    /// If so, type_data::keep_shared_from_this_alive is also set.
+    has_shared_from_this     = (1 << 12),
 
-    // Six more flag bits available (13 through 18) without needing
-    // a larger reorganization
+    /// Instances of this type can be referenced by 'weakref'
+    is_weak_referenceable    = (1 << 13),
+
+    /// A custom signature override was specified
+    has_signature            = (1 << 14),
+
+    /// The class implements __class_getitem__ similar to typing.Generic
+    is_generic               = (1 << 15),
+
+    /// Does the type implement a custom __new__ operator?
+    has_new                  = (1 << 16),
+
+    /// Does the type implement a custom __new__ operator that can take no args
+    /// (except the type object)?
+    has_nullary_new          = (1 << 17)
+
+    // One more bit available without needing a larger reorganization
 };
 
 /// Flags about a type that are only relevant when it is being created.
@@ -69,11 +85,25 @@ enum class type_init_flags : uint32_t {
     /// Is the 'base_py' field of the type_init_data structure set?
     has_base_py              = (1 << 22),
 
-    /// This type provides extra PyType_Slot fields via the 'type_slots'
-    /// and/or 'type_slots_callback' members of type_init_data
+    /// This type provides extra PyType_Slot fields
     has_type_slots           = (1 << 23),
 
     all_init_flags           = (0x1f << 19)
+};
+
+// See internals.h
+struct nb_alias_chain;
+
+// Implicit conversions for C++ type bindings, used in type_data below
+struct implicit_t {
+    const std::type_info **cpp;
+    bool (**py)(PyTypeObject *, PyObject *, cleanup_list *) noexcept;
+};
+
+// Forward and reverse mappings for enumerations, used in type_data below
+struct enum_tbl_t {
+    void *fwd;
+    void *rev;
 };
 
 /// Information about a type that persists throughout its lifetime
@@ -84,14 +114,23 @@ struct type_data {
     const char *name;
     const std::type_info *type;
     PyTypeObject *type_py;
+    nb_alias_chain *alias_chain;
+#if defined(Py_LIMITED_API)
+    PyObject* (*vectorcall)(PyObject *, PyObject * const*, size_t, PyObject *);
+#endif
+    void *init; // Constructor nb_func
     void (*destruct)(void *);
     void (*copy)(void *, const void *);
     void (*move)(void *, void *) noexcept;
-    const std::type_info **implicit;
-    bool (**implicit_py)(PyTypeObject *, PyObject *, cleanup_list *) noexcept;
+    union {
+        implicit_t implicit;  // for C++ type bindings
+        enum_tbl_t enum_tbl;  // for enumerations
+    };
     void (*set_self_py)(void *, PyObject *) noexcept;
+    bool (*keep_shared_from_this_alive)(PyObject *) noexcept;
 #if defined(Py_LIMITED_API)
-    size_t dictoffset;
+    uint32_t dictoffset;
+    uint32_t weaklistoffset;
 #endif
 };
 
@@ -102,7 +141,6 @@ struct type_init_data : type_data {
     PyTypeObject *base_py;
     const char *doc;
     const PyType_Slot *type_slots;
-    void (*type_slots_callback)(const type_init_data *d, PyType_Slot *&slots, size_t max_slots);
     size_t supplement;
 };
 
@@ -117,19 +155,8 @@ NB_INLINE void type_extra_apply(type_init_data &t, const char *doc) {
 }
 
 NB_INLINE void type_extra_apply(type_init_data &t, type_slots c) {
-    if ((t.flags & (uint32_t) type_init_flags::has_type_slots) == 0) {
-        t.flags |= (uint32_t) type_init_flags::has_type_slots;
-        t.type_slots_callback = nullptr;
-    }
+    t.flags |= (uint32_t) type_init_flags::has_type_slots;
     t.type_slots = c.value;
-}
-
-NB_INLINE void type_extra_apply(type_init_data &t, type_slots_callback c) {
-    if ((t.flags & (uint32_t) type_init_flags::has_type_slots) == 0) {
-        t.flags |= (uint32_t) type_init_flags::has_type_slots;
-        t.type_slots = nullptr;
-    }
-    t.type_slots_callback = c.callback;
 }
 
 template <typename T>
@@ -146,6 +173,19 @@ NB_INLINE void type_extra_apply(type_init_data &t, dynamic_attr) {
     t.flags |= (uint32_t) type_flags::has_dynamic_attr;
 }
 
+NB_INLINE void type_extra_apply(type_init_data & t, is_weak_referenceable) {
+    t.flags |= (uint32_t) type_flags::is_weak_referenceable;
+}
+
+NB_INLINE void type_extra_apply(type_init_data & t, is_generic) {
+    t.flags |= (uint32_t) type_flags::is_generic;
+}
+
+NB_INLINE void type_extra_apply(type_init_data & t, const sig &s) {
+    t.flags |= (uint32_t) type_flags::has_signature;
+    t.name = s.value;
+}
+
 template <typename T>
 NB_INLINE void type_extra_apply(type_init_data &t, supplement<T>) {
     static_assert(std::is_trivially_default_constructible_v<T>,
@@ -156,34 +196,45 @@ NB_INLINE void type_extra_apply(type_init_data &t, supplement<T>) {
     t.supplement = sizeof(T);
 }
 
-/// Information about an enum, stored as its type_data::supplement
-struct enum_supplement {
-    bool is_signed = false;
-    PyObject* entries = nullptr;
-    PyObject* scope = nullptr;
+enum class enum_flags : uint32_t {
+    /// Is this an arithmetic enumeration?
+    is_arithmetic            = (1 << 1),
+
+    /// Is the number type underlying the enumeration signed?
+    is_signed                = (1 << 2),
+
+    /// Is the underlying enumeration type Flag?
+    is_flag                = (1 << 3)
 };
 
-/// Information needed to create an enum
-struct enum_init_data : type_init_data {
-    bool is_signed = false;
-    bool is_arithmetic = false;
+struct enum_init_data {
+    const std::type_info *type;
+    PyObject *scope;
+    const char *name;
+    const char *docstr;
+    uint32_t flags;
 };
 
-NB_INLINE void type_extra_apply(enum_init_data &ed, is_arithmetic) {
-    ed.is_arithmetic = true;
+NB_INLINE void enum_extra_apply(enum_init_data &e, is_arithmetic) {
+    e.flags |= (uint32_t) enum_flags::is_arithmetic;
 }
 
-// Enums can't have base classes or supplements or be intrusive, and
-// are always final. They can't use type_slots_callback because that is
-// used by the enum mechanism internally, but can provide additional
-// slots using type_slots.
-void type_extra_apply(enum_init_data &, const handle &) = delete;
+NB_INLINE void enum_extra_apply(enum_init_data &e, is_flag) {
+    e.flags |= (uint32_t) enum_flags::is_flag;
+}
+
+NB_INLINE void enum_extra_apply(enum_init_data &e, const char *doc) {
+    e.docstr = doc;
+}
+
 template <typename T>
-void type_extra_apply(enum_init_data &, intrusive_ptr<T>) = delete;
-template <typename T>
-void type_extra_apply(enum_init_data &, supplement<T>) = delete;
-void type_extra_apply(enum_init_data &, is_final) = delete;
-void type_extra_apply(enum_init_data &, type_slots_callback) = delete;
+NB_INLINE void enum_extra_apply(enum_init_data &, T) {
+    static_assert(
+        std::is_void_v<T>,
+        "Invalid enum binding annotation. The implementation of "
+        "enums changed nanobind 2.0.0: only nb::is_arithmetic and "
+        "docstrings can be passed since this change.");
+}
 
 template <typename T> void wrap_copy(void *dst, const void *src) {
     new ((T *) dst) T(*(const T *) src);
@@ -239,22 +290,60 @@ inline size_t type_align(handle h) { return detail::nb_type_align(h.ptr()); }
 inline const std::type_info& type_info(handle h) { return *detail::nb_type_info(h.ptr()); }
 template <typename T>
 inline T &type_supplement(handle h) { return *(T *) detail::nb_type_supplement(h.ptr()); }
+inline str type_name(handle h) { return steal<str>(detail::nb_type_name(h.ptr())); }
 
 // Low level access to nanobind instance objects
 inline bool inst_check(handle h) { return type_check(h.type()); }
-inline object inst_alloc(handle h) { return steal(detail::nb_inst_alloc((PyTypeObject *) h.ptr())); }
-inline object inst_wrap(handle h, void *p) { return steal(detail::nb_inst_wrap((PyTypeObject *) h.ptr(), p)); }
+inline str inst_name(handle h) {
+    return steal<str>(detail::nb_inst_name(h.ptr()));
+}
+inline object inst_alloc(handle h) {
+    return steal(detail::nb_inst_alloc((PyTypeObject *) h.ptr()));
+}
+inline object inst_alloc_zero(handle h) {
+    return steal(detail::nb_inst_alloc_zero((PyTypeObject *) h.ptr()));
+}
+inline object inst_take_ownership(handle h, void *p) {
+    return steal(detail::nb_inst_take_ownership((PyTypeObject *) h.ptr(), p));
+}
+inline object inst_reference(handle h, void *p, handle parent = handle()) {
+    return steal(detail::nb_inst_reference((PyTypeObject *) h.ptr(), p, parent.ptr()));
+}
 inline void inst_zero(handle h) { detail::nb_inst_zero(h.ptr()); }
-inline void inst_set_state(handle h, bool ready, bool destruct) { detail::nb_inst_set_state(h.ptr(), ready, destruct); }
-inline std::pair<bool, bool> inst_state(handle h) { return detail::nb_inst_state(h.ptr()); }
+inline void inst_set_state(handle h, bool ready, bool destruct) {
+    detail::nb_inst_set_state(h.ptr(), ready, destruct);
+}
+inline std::pair<bool, bool> inst_state(handle h) {
+    return detail::nb_inst_state(h.ptr());
+}
 inline void inst_mark_ready(handle h) { inst_set_state(h, true, true); }
 inline bool inst_ready(handle h) { return inst_state(h).first; }
 inline void inst_destruct(handle h) { detail::nb_inst_destruct(h.ptr()); }
 inline void inst_copy(handle dst, handle src) { detail::nb_inst_copy(dst.ptr(), src.ptr()); }
 inline void inst_move(handle dst, handle src) { detail::nb_inst_move(dst.ptr(), src.ptr()); }
+inline void inst_replace_copy(handle dst, handle src) { detail::nb_inst_replace_copy(dst.ptr(), src.ptr()); }
+inline void inst_replace_move(handle dst, handle src) { detail::nb_inst_replace_move(dst.ptr(), src.ptr()); }
 template <typename T> T *inst_ptr(handle h) { return (T *) detail::nb_inst_ptr(h.ptr()); }
+inline void *type_get_slot(handle h, int slot_id) {
+#if NB_TYPE_GET_SLOT_IMPL
+    return detail::type_get_slot((PyTypeObject *) h.ptr(), slot_id);
+#else
+    return PyType_GetSlot((PyTypeObject *) h.ptr(), slot_id);
+#endif
+}
 
-template <typename... Args> struct init {
+template <typename Visitor> struct def_visitor {
+  protected:
+    // Ensure def_visitor<T> can only be derived from, not constructed
+    // directly
+    def_visitor() {
+        static_assert(std::is_base_of_v<def_visitor, Visitor>,
+                      "def_visitor uses CRTP: def_visitor<T> should be "
+                      "a base of T");
+    }
+};
+
+template <typename... Args> struct init : def_visitor<init<Args...>> {
     template <typename T, typename... Ts> friend class class_;
     NB_INLINE init() {}
 
@@ -263,29 +352,23 @@ private:
     NB_INLINE static void execute(Class &cl, const Extra&... extra) {
         using Type = typename Class::Type;
         using Alias = typename Class::Alias;
-        static_assert(
-            detail::make_caster<Type>::IsClass,
-            "Attempted to create a constructor for a type that won't be "
-            "handled by the nanobind's class type caster. Is it possible that "
-            "you forgot to add NB_MAKE_OPAQUE() somewhere?");
-
         cl.def(
             "__init__",
             [](pointer_and_handle<Type> v, Args... args) {
                 if constexpr (!std::is_same_v<Type, Alias> &&
                               std::is_constructible_v<Type, Args...>) {
                     if (!detail::nb_inst_python_derived(v.h.ptr())) {
-                        new ((Type *) v.p) Type{ (detail::forward_t<Args>) args... };
+                        new (v.p) Type{ (detail::forward_t<Args>) args... };
                         return;
                     }
                 }
-                new ((Alias *) v.p) Alias{ (detail::forward_t<Args>) args... };
+                new ((void *) v.p) Alias{ (detail::forward_t<Args>) args... };
             },
             extra...);
     }
 };
 
-template <typename Arg> struct init_implicit {
+template <typename Arg> struct init_implicit : def_visitor<init_implicit<Arg>> {
     template <typename T, typename... Ts> friend class class_;
     NB_INLINE init_implicit() { }
 
@@ -294,12 +377,6 @@ private:
     NB_INLINE static void execute(Class &cl, const Extra&... extra) {
         using Type = typename Class::Type;
         using Alias = typename Class::Alias;
-        using Caster = detail::make_caster<Arg>;
-        static_assert(
-            detail::make_caster<Type>::IsClass,
-            "Attempted to create a constructor for a type that won't be "
-            "handled by the nanobind's class type caster. Is it possible that "
-            "you forgot to add NB_MAKE_OPAQUE() somewhere?");
 
         cl.def(
             "__init__",
@@ -314,7 +391,9 @@ private:
                 new ((Alias *) v.p) Alias{ (detail::forward_t<Arg>) arg };
             }, is_implicit(), extra...);
 
-        if constexpr (!Caster::IsClass) {
+        using Caster = detail::make_caster<Arg>;
+
+        if constexpr (!detail::is_class_caster_v<Caster>) {
             detail::implicitly_convertible(
                 [](PyTypeObject *, PyObject *src,
                    detail::cleanup_list *cleanup) noexcept -> bool {
@@ -326,19 +405,154 @@ private:
     }
 };
 
+namespace detail {
+    // This is 'inline' so we can define it in a header and not pay
+    // for it if unused, and also 'noinline' so we don't generate
+    // multiple copies and produce code bloat.
+    NB_NOINLINE inline void wrap_base_new(handle cls, bool do_wrap) {
+        if (PyCFunction_Check(cls.attr("__new__").ptr())) {
+            if (do_wrap) {
+                cpp_function_def(
+                    [](handle type) {
+                        if (!type_check(type))
+                            detail::raise_cast_error();
+                        return inst_alloc(type);
+                    },
+                    scope(cls), name("__new__"));
+            }
+        } else {
+            if (!do_wrap) {
+                // We already defined the wrapper, so this zero-arg overload
+                // would be unreachable. Raise an error rather than hiding it.
+                raise("nanobind: %s must define its zero-argument __new__ "
+                      "before any other overloads", type_name(cls).c_str());
+            }
+        }
+    }
+
+    // Call policy that ensures __new__ returns an instance of the correct
+    // Python type, even when deriving from the C++ class in Python
+    struct new_returntype_fixup_policy {
+        static inline void precall(PyObject **, size_t,
+                                   detail::cleanup_list *) {}
+        NB_NOINLINE static inline void postcall(PyObject **args, size_t,
+                                                PyObject *&ret) {
+            handle type_requested = args[0];
+            if (ret == nullptr || !type_requested.is_type())
+                return; // somethign strange about this call; don't meddle
+            handle type_created = Py_TYPE(ret);
+            if (type_created.is(type_requested))
+                return; // already created the requested type so no fixup needed
+
+            if (type_check(type_created) &&
+                PyType_IsSubtype((PyTypeObject *) type_requested.ptr(),
+                                 (PyTypeObject *) type_created.ptr()) &&
+                type_info(type_created) == type_info(type_requested)) {
+                // The new_ constructor returned an instance of a bound type T.
+                // The user wanted an instance of some python subclass S of T.
+                // Since both wrap the same C++ type, we can satisfy the request
+                // by returning a pyobject of type S that wraps a C++ T*, and
+                // handling the lifetimes by having that pyobject keep the
+                // already-created T pyobject alive.
+                object wrapper = inst_reference(type_requested,
+                                                inst_ptr<void>(ret),
+                                                /* parent = */ ret);
+                handle(ret).dec_ref();
+                ret = wrapper.release().ptr();
+            }
+        }
+    };
+}
+
+template <typename Func, typename Sig = detail::function_signature_t<Func>>
+struct new_;
+
+template <typename Func, typename Return, typename... Args>
+struct new_<Func, Return(Args...)> : def_visitor<new_<Func, Return(Args...)>> {
+    std::remove_reference_t<Func> func;
+
+    new_(Func &&f) : func((detail::forward_t<Func>) f) {}
+
+    template <typename Class, typename... Extra>
+    NB_INLINE void execute(Class &cl, const Extra&... extra) {
+        // If this is the first __new__ overload we're defining, then wrap
+        // nanobind's built-in __new__ so we overload with it instead of
+        // replacing it; this is important for pickle support.
+        // We can't do this if the user-provided __new__ takes no
+        // arguments, because it would make an ambiguous overload set.
+        constexpr size_t num_defaults =
+            ((std::is_same_v<Extra, arg_v> ||
+              std::is_same_v<Extra, arg_locked_v>) + ... + 0);
+        constexpr size_t num_varargs =
+            ((std::is_same_v<detail::intrinsic_t<Args>, args> ||
+              std::is_same_v<detail::intrinsic_t<Args>, kwargs>) + ... + 0);
+        detail::wrap_base_new(cl, sizeof...(Args) > num_defaults + num_varargs);
+
+        auto wrapper = [func_ = (detail::forward_t<Func>) func](handle, Args... args) {
+            return func_((detail::forward_t<Args>) args...);
+        };
+
+        auto policy = call_policy<detail::new_returntype_fixup_policy>();
+        if constexpr ((std::is_base_of_v<arg, Extra> || ...)) {
+            // If any argument annotations are specified, add another for the
+            // extra class argument that we don't forward to Func, so visible
+            // arg() annotations stay aligned with visible function arguments.
+            cl.def_static("__new__", std::move(wrapper), arg("cls"), extra...,
+                          policy);
+        } else {
+            cl.def_static("__new__", std::move(wrapper), extra..., policy);
+        }
+        cl.def("__init__", [](handle, Args...) {}, extra...);
+    }
+};
+template <typename Func> new_(Func&& f) -> new_<Func>;
+
+template <typename T> struct for_setter {
+    T value;
+    for_setter(const T &value) : value(value) { }
+};
+
+template <typename T> struct for_getter {
+    T value;
+    for_getter(const T &value) : value(value) { }
+};
+
+template <typename T> for_getter(T) -> for_getter<std::decay_t<T>>;
+template <typename T> for_setter(T) -> for_setter<std::decay_t<T>>;
+
+namespace detail {
+    template <typename T> auto filter_getter(const T &v) { return v; }
+    template <typename T> auto filter_getter(const for_getter<T> &v) { return v.value; }
+    template <typename T> std::nullptr_t filter_getter(const for_setter<T> &) { return nullptr; }
+
+    template <typename T> auto filter_setter(const T &v) { return v; }
+    template <typename T> auto filter_setter(const for_setter<T> &v) { return v.value; }
+    template <typename T> std::nullptr_t filter_setter(const for_getter<T> &) { return nullptr; }
+}
+
 template <typename T, typename... Ts>
 class class_ : public object {
 public:
-    NB_OBJECT_DEFAULT(class_, object, "type", PyType_Check);
+    NB_OBJECT_DEFAULT(class_, object, "type", PyType_Check)
     using Type = T;
     using Base  = typename detail::extract<T, detail::is_base,  Ts...>::type;
     using Alias = typename detail::extract<T, detail::is_alias, Ts...>::type;
 
-    static_assert(sizeof(Alias) < (1 << 24), "instance size is too big!");
-    static_assert(alignof(Alias) < (1 << 8), "instance alignment is too big!");
+    static_assert(sizeof(Alias) < (((uint64_t) 1) << 32), "Instance size is too big!");
+    static_assert(alignof(Alias) < (1 << 8), "Instance alignment is too big!");
     static_assert(
         sizeof...(Ts) == !std::is_same_v<Base, T> + !std::is_same_v<Alias, T>,
         "nanobind::class_<> was invoked with extra arguments that could not be handled");
+
+    static_assert(
+        detail::is_base_caster_v<detail::make_caster<Type>>,
+        "You attempted to bind a type that is already intercepted by a type "
+        "caster. Having both at the same time is not allowed. Are you perhaps "
+        "binding an STL type, while at the same time including a matching "
+        "type caster from <nanobind/stl/*>? Or did you perhaps forget to "
+        "declare NB_MAKE_OPAQUE(..) to specifically disable the type caster "
+        "catch-all for a specific type? Please review the documentation "
+        "to learn about the difference between bindings and type casters.");
 
     template <typename... Extra>
     NB_INLINE class_(handle scope, const char *name, const Extra &... extra) {
@@ -355,9 +569,6 @@ public:
             d.base = &typeid(Base);
             d.flags |= (uint32_t) detail::type_init_flags::has_base;
         }
-
-        if constexpr (!std::is_same_v<Alias, T>)
-            d.flags |= (uint32_t) detail::type_flags::is_trampoline;
 
         if constexpr (detail::is_copy_constructible_v<T>) {
             d.flags |= (uint32_t) detail::type_flags::is_copy_constructible;
@@ -386,6 +597,24 @@ public:
             }
         }
 
+        if constexpr (detail::has_shared_from_this_v<T>) {
+            d.flags |= (uint32_t) detail::type_flags::has_shared_from_this;
+            d.keep_shared_from_this_alive = [](PyObject *self) noexcept {
+                // weak_from_this().lock() is equivalent to shared_from_this(),
+                // except that it returns an empty shared_ptr instead of
+                // throwing an exception if there is no active shared_ptr
+                // for this object. (Added in C++17.)
+                if (auto sp = inst_ptr<T>(self)->weak_from_this().lock()) {
+                    detail::keep_alive(self, new auto(std::move(sp)),
+                                       [](void *p) noexcept {
+                                           delete (decltype(sp) *) p;
+                                       });
+                    return true;
+                }
+                return false;
+            };
+        }
+
         (detail::type_extra_apply(d, extra), ...);
 
         m_ptr = detail::nb_type_new(&d);
@@ -393,20 +622,14 @@ public:
 
     template <typename Func, typename... Extra>
     NB_INLINE class_ &def(const char *name_, Func &&f, const Extra &... extra) {
-        cpp_function_def((detail::forward_t<Func>) f, scope(*this), name(name_),
-                         is_method(), extra...);
+        cpp_function_def<T>((detail::forward_t<Func>) f, scope(*this),
+                            name(name_), is_method(), extra...);
         return *this;
     }
 
-    template <typename... Args, typename... Extra>
-    NB_INLINE class_ &def(init<Args...> &&init, const Extra &... extra) {
-        init.execute(*this, extra...);
-        return *this;
-    }
-
-    template <typename Arg, typename... Extra>
-    NB_INLINE class_ &def(init_implicit<Arg> &&init, const Extra &... extra) {
-        init.execute(*this, extra...);
+    template <typename Visitor, typename... Extra>
+    NB_INLINE class_ &def(def_visitor<Visitor> &&arg, const Extra &... extra) {
+        static_cast<Visitor&&>(arg).execute(*this, extra...);
         return *this;
     }
 
@@ -427,13 +650,14 @@ public:
         object get_p, set_p;
 
         if constexpr (!std::is_same_v<Getter, std::nullptr_t>)
-            get_p = cpp_function((detail::forward_t<Getter>) getter,
-                                 scope(*this), is_method(),
-                                 rv_policy::reference_internal, extra...);
+            get_p = cpp_function<T>((detail::forward_t<Getter>) getter,
+                                    is_method(), is_getter(),
+                                    rv_policy::reference_internal,
+                                    detail::filter_getter(extra)...);
 
         if constexpr (!std::is_same_v<Setter, std::nullptr_t>)
-            set_p = cpp_function((detail::forward_t<Setter>) setter,
-                                 scope(*this), is_method(), extra...);
+            set_p = cpp_function<T>((detail::forward_t<Setter>) setter,
+                                    is_method(), detail::filter_setter(extra)...);
 
         detail::property_install(m_ptr, name_, get_p.ptr(), set_p.ptr());
         return *this;
@@ -446,12 +670,13 @@ public:
         object get_p, set_p;
 
         if constexpr (!std::is_same_v<Getter, std::nullptr_t>)
-            get_p = cpp_function((detail::forward_t<Getter>) getter,
-                                 scope(*this), rv_policy::reference, extra...);
+            get_p = cpp_function((detail::forward_t<Getter>) getter, is_getter(),
+                                 rv_policy::reference,
+                                 detail::filter_getter(extra)...);
 
         if constexpr (!std::is_same_v<Setter, std::nullptr_t>)
             set_p = cpp_function((detail::forward_t<Setter>) setter,
-                                 scope(*this), extra...);
+                                 detail::filter_setter(extra)...);
 
         detail::property_install_static(m_ptr, name_, get_p.ptr(), set_p.ptr());
         return *this;
@@ -473,10 +698,13 @@ public:
     template <typename C, typename D, typename... Extra>
     NB_INLINE class_ &def_rw(const char *name, D C::*p,
                              const Extra &...extra) {
-        static_assert(std::is_base_of_v<C, T>,
+        // Unions never satisfy is_base_of, thus the is_same alternative
+        static_assert(std::is_base_of_v<C, T> || std::is_same_v<C, T>,
                       "def_rw() requires a (base) class member!");
 
-        using Q = std::conditional_t<detail::make_caster<D>::IsClass, const D &, D &&>;
+        using Q =
+            std::conditional_t<detail::is_base_caster_v<detail::make_caster<D>>,
+                               const D &, D &&>;
 
         def_prop_rw(name,
             [p](const T &c) -> const D & { return c.*p; },
@@ -489,7 +717,9 @@ public:
     template <typename D, typename... Extra>
     NB_INLINE class_ &def_rw_static(const char *name, D *p,
                                     const Extra &...extra) {
-        using Q = std::conditional_t<detail::make_caster<D>::IsClass, const D &, D &&>;
+        using Q =
+            std::conditional_t<detail::is_base_caster_v<detail::make_caster<D>>,
+                               const D &, D &&>;
 
         def_prop_rw_static(name,
             [p](handle) -> const D & { return *p; },
@@ -501,7 +731,8 @@ public:
     template <typename C, typename D, typename... Extra>
     NB_INLINE class_ &def_ro(const char *name, D C::*p,
                              const Extra &...extra) {
-        static_assert(std::is_base_of_v<C, T>,
+        // Unions never satisfy is_base_of, thus the is_same alternative
+        static_assert(std::is_base_of_v<C, T> || std::is_same_v<C, T>,
                       "def_ro() requires a (base) class member!");
 
         def_prop_ro(name,
@@ -532,63 +763,97 @@ public:
     }
 };
 
-template <typename T> class enum_ : public class_<T> {
+template <typename T> class enum_ : public object {
 public:
     static_assert(std::is_enum_v<T>, "nanobind::enum_<> requires an enumeration type!");
 
     using Base = class_<T>;
+    using Underlying = std::underlying_type_t<T>;
 
     template <typename... Extra>
-    NB_INLINE enum_(handle scope, const char *name, const Extra &...extra) {
-        detail::enum_init_data d;
-
-        static_assert(std::is_trivially_copyable_v<T>);
-        d.flags = ((uint32_t) detail::type_init_flags::has_supplement |
-                   (uint32_t) detail::type_init_flags::has_type_slots |
-                   (uint32_t) detail::type_flags::is_copy_constructible |
-                   (uint32_t) detail::type_flags::is_move_constructible |
-                   (uint32_t) detail::type_flags::is_destructible |
-                   (uint32_t) detail::type_flags::is_final);
-        d.align = (uint8_t) alignof(T);
-        d.size = (uint32_t) sizeof(T);
-        d.name = name;
-        d.type = &typeid(T);
-        d.supplement = sizeof(detail::enum_supplement);
-        d.scope = scope.ptr();
-        d.type_slots = nullptr;
-        d.type_slots_callback = detail::nb_enum_prepare;
-        d.is_signed = std::is_signed_v<std::underlying_type_t<T>>;
-
-        (detail::type_extra_apply(d, extra), ...);
-
-        Base::m_ptr = detail::nb_type_new(&d);
-
-        detail::enum_supplement &supp = type_supplement<detail::enum_supplement>(*this);
-        supp.is_signed = d.is_signed;
-        supp.scope = d.scope;
+    NB_INLINE enum_(handle scope, const char *name, const Extra &... extra) {
+        detail::enum_init_data ed { };
+        ed.type = &typeid(T);
+        ed.scope = scope.ptr();
+        ed.name = name;
+        ed.flags = std::is_signed_v<Underlying>
+                       ? (uint32_t) detail::enum_flags::is_signed
+                       : 0;
+        (detail::enum_extra_apply(ed, extra), ...);
+        m_ptr = detail::enum_create(&ed);
     }
 
     NB_INLINE enum_ &value(const char *name, T value, const char *doc = nullptr) {
-        detail::nb_enum_put(Base::m_ptr, name, &value, doc);
+        detail::enum_append(m_ptr, name, (int64_t) value, doc);
         return *this;
     }
 
-    NB_INLINE enum_ &export_values() { detail::nb_enum_export(Base::m_ptr); return *this; }
+    NB_INLINE enum_ &export_values() { detail::enum_export(m_ptr); return *this; }
+
+    template <typename Func, typename... Extra>
+    NB_INLINE enum_ &def(const char *name_, Func &&f, const Extra &... extra) {
+        cpp_function_def<T>((detail::forward_t<Func>) f, scope(*this),
+                            name(name_), is_method(), extra...);
+        return *this;
+    }
+
+    template <typename Func, typename... Extra>
+    NB_INLINE enum_ &def_static(const char *name_, Func &&f,
+                                 const Extra &... extra) {
+        static_assert(
+            !std::is_member_function_pointer_v<Func>,
+            "def_static(...) called with a non-static member function pointer");
+        cpp_function_def((detail::forward_t<Func>) f, scope(*this), name(name_),
+                         extra...);
+        return *this;
+    }
+
+    template <typename Getter, typename Setter, typename... Extra>
+    NB_INLINE enum_ &def_prop_rw(const char *name_, Getter &&getter,
+                                 Setter &&setter, const Extra &...extra) {
+        object get_p, set_p;
+
+        if constexpr (!std::is_same_v<Getter, std::nullptr_t>)
+            get_p = cpp_function<T>((detail::forward_t<Getter>) getter,
+                                    is_method(), is_getter(),
+                                    rv_policy::reference_internal,
+                                    detail::filter_getter(extra)...);
+
+        if constexpr (!std::is_same_v<Setter, std::nullptr_t>)
+            set_p = cpp_function<T>((detail::forward_t<Setter>) setter,
+                                    is_method(), detail::filter_setter(extra)...);
+
+        detail::property_install(m_ptr, name_, get_p.ptr(), set_p.ptr());
+        return *this;
+    }
+
+
+    template <typename Getter, typename... Extra>
+    NB_INLINE enum_ &def_prop_ro(const char *name_, Getter &&getter,
+                                 const Extra &...extra) {
+        return def_prop_rw(name_, getter, nullptr, extra...);
+    }
 };
 
 template <typename Source, typename Target> void implicitly_convertible() {
-    using Caster = detail::make_caster<Source>;
+    if constexpr (!std::is_same_v<Source, Target>) {
+        using Caster = detail::make_caster<Source>;
+        static_assert(
+            !std::is_enum_v<Target> || !detail::is_base_caster_v<Target>,
+            "implicitly_convertible(): 'Target' cannot be an enumeration "
+            "unless it is opaque.");
 
-    if constexpr (Caster::IsClass) {
-        detail::implicitly_convertible(&typeid(Source), &typeid(Target));
-    } else {
-        detail::implicitly_convertible(
-            [](PyTypeObject *, PyObject *src,
-               detail::cleanup_list *cleanup) noexcept -> bool {
-                return Caster().from_python(src, detail::cast_flags::convert,
-                                            cleanup);
-            },
-            &typeid(Target));
+        if constexpr (detail::is_base_caster_v<Caster>) {
+            detail::implicitly_convertible(&typeid(Source), &typeid(Target));
+        } else {
+            detail::implicitly_convertible(
+                [](PyTypeObject *, PyObject *src,
+                   detail::cleanup_list *cleanup) noexcept -> bool {
+                    return Caster().from_python(src, detail::cast_flags::convert,
+                                                cleanup);
+                },
+                &typeid(Target));
+        }
     }
 }
 

@@ -14,32 +14,37 @@
 NAMESPACE_BEGIN(NB_NAMESPACE)
 NAMESPACE_BEGIN(detail)
 
-template <typename Value_, typename Key> struct set_caster {
-    NB_TYPE_CASTER(Value_, const_name(NB_TYPING_SET "[") + make_caster<Key>::Name + const_name("]"));
+template <typename Set, typename Key> struct set_caster {
+    NB_TYPE_CASTER(Set, io_name(NB_TYPING_ABSTRACT_SET, NB_TYPING_SET) +
+                            const_name("[") + make_caster<Key>::Name +
+                            const_name("]"))
 
-    using KeyCaster = make_caster<Key>;
+    using Caster = make_caster<Key>;
 
     bool from_python(handle src, uint8_t flags, cleanup_list *cleanup) noexcept {
         value.clear();
 
-        PyObject* iter = obj_iter(src.ptr());
-        if (iter == nullptr) {
+        PyObject* iter = PyObject_GetIter(src.ptr());
+        if (!iter) {
             PyErr_Clear();
             return false;
         }
 
         bool success = true;
-        KeyCaster key_caster;
+        Caster key_caster;
         PyObject *key;
 
+        flags = flags_for_local_caster<Key>(flags);
+
         while ((key = PyIter_Next(iter)) != nullptr) {
-            success &= key_caster.from_python(key, flags, cleanup);
+            success &= (key_caster.from_python(key, flags, cleanup) &&
+                        key_caster.template can_cast<Key>());
             Py_DECREF(key);
 
             if (!success)
                 break;
 
-            value.emplace(((KeyCaster &&) key_caster).operator cast_t<Key&&>());
+            value.emplace(key_caster.operator cast_t<Key>());
         }
 
         if (PyErr_Occurred()) {
@@ -59,7 +64,7 @@ template <typename Value_, typename Key> struct set_caster {
         if (ret.is_valid()) {
             for (auto& key : src) {
                 object k = steal(
-                    KeyCaster::from_cpp(forward_like<T>(key), policy, cleanup));
+                    Caster::from_cpp(forward_like_<T>(key), policy, cleanup));
 
                 if (!k.is_valid() || PySet_Add(ret.ptr(), k.ptr()) != 0) {
                     ret.reset();

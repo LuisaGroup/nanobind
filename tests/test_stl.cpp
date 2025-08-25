@@ -12,6 +12,8 @@
 #include <nanobind/stl/unordered_set.h>
 #include <nanobind/stl/set.h>
 #include <nanobind/stl/filesystem.h>
+#include <nanobind/stl/complex.h>
+#include <nanobind/stl/wstring.h>
 
 NB_MAKE_OPAQUE(std::vector<float, std::allocator<float>>)
 
@@ -43,6 +45,18 @@ struct Copyable {
     ~Copyable() { destructed++; }
 };
 
+struct NonAssignable {
+  int value = 5;
+
+  NonAssignable() = default;
+  NonAssignable(const NonAssignable &x) : value(x.value) { }
+  NonAssignable &operator=(const NonAssignable &) = delete;
+};
+
+struct NonDefaultConstructible : Movable {
+    NonDefaultConstructible(int v) : Movable(v) {}
+};
+
 struct StructWithReadonlyMap {
     std::map<std::string, uint64_t> map;
 };
@@ -55,14 +69,21 @@ struct FuncWrapper {
 };
 
 int funcwrapper_tp_traverse(PyObject *self, visitproc visit, void *arg) {
+    #if PY_VERSION_HEX >= 0x03090000
+        Py_VISIT(Py_TYPE(self));
+    #endif
+
+    if (!nb::inst_ready(self)) {
+        return 0;
+    }
+
     FuncWrapper *w = nb::inst_ptr<FuncWrapper>(self);
 
-    nb::object f = nb::cast(w->f, nb::rv_policy::none);
+    nb::handle f = nb::cast(w->f, nb::rv_policy::none);
     Py_VISIT(f.ptr());
 
     return 0;
-};
-
+}
 
 int FuncWrapper::alive = 0;
 
@@ -100,6 +121,14 @@ NB_MODULE(test_stl_ext, m) {
         .def(nb::init<>())
         .def(nb::init<int>())
         .def_rw("value", &Copyable::value);
+
+    nb::class_<NonAssignable>(m, "NonAssignable")
+        .def(nb::init<>())
+        .def_rw("value", &NonAssignable::value);
+
+    nb::class_<NonDefaultConstructible>(m, "NonDefaultConstructible")
+        .def(nb::init<int>())
+        .def_rw("value", &NonDefaultConstructible::value);
 
     nb::class_<StructWithReadonlyMap>(m, "StructWithReadonlyMap")
         .def(nb::init<>())
@@ -160,7 +189,7 @@ NB_MODULE(test_stl_ext, m) {
         return x;
     });
 
-    m.def("vec_moveable_in_value", [](std::vector<Movable> x) {
+    m.def("vec_movable_in_value", [](std::vector<Movable> x) {
         if (x.size() != 10)
             fail();
         for (int i = 0; i< 10; ++i)
@@ -178,7 +207,7 @@ NB_MODULE(test_stl_ext, m) {
     });
 
 
-    m.def("vec_moveable_in_lvalue_ref", [](std::vector<Movable> &x) {
+    m.def("vec_movable_in_lvalue_ref", [](std::vector<Movable> &x) {
         if (x.size() != 10)
             fail();
         for (int i = 0; i< 10; ++i)
@@ -187,7 +216,7 @@ NB_MODULE(test_stl_ext, m) {
     });
 
 
-    m.def("vec_moveable_in_rvalue_ref", [](std::vector<Movable> &&x) {
+    m.def("vec_movable_in_rvalue_ref", [](std::vector<Movable> &&x) {
         if (x.size() != 10)
             fail();
         for (int i = 0; i< 10; ++i)
@@ -195,7 +224,7 @@ NB_MODULE(test_stl_ext, m) {
                 fail();
     });
 
-    m.def("vec_moveable_in_ptr_2", [](std::vector<Movable *> x) {
+    m.def("vec_movable_in_ptr_2", [](std::vector<Movable *> x) {
         if (x.size() != 10)
             fail();
         for (int i = 0; i< 10; ++i)
@@ -238,7 +267,7 @@ NB_MODULE(test_stl_ext, m) {
     nb::class_<FuncWrapper>(m, "FuncWrapper", nb::type_slots(slots))
         .def(nb::init<>())
         .def_rw("f", &FuncWrapper::f)
-        .def_ro_static("alive", &FuncWrapper::alive);
+        .def_ro_static("alive", &FuncWrapper::alive, "static read-only property");
 
     // ----- test35 ------
     m.def("identity_string", [](std::string& x) { return x; });
@@ -252,16 +281,22 @@ NB_MODULE(test_stl_ext, m) {
     m.def("optional_ret_opt_movable_ptr", []() { return new std::optional<Movable *>(new Movable()); });
     m.def("optional_ret_opt_none", []() { return std::optional<Movable>(); });
     m.def("optional_unbound_type", [](std::optional<int> &x) { return x; }, nb::arg("x") = nb::none());
+    m.def("optional_unbound_type_with_nullopt_as_default", [](std::optional<int> &x) { return x; }, nb::arg("x") = std::nullopt);
+    m.def("optional_non_assignable", [](std::optional<NonAssignable> &x) { return x; });
 
     // ----- test43-test50 ------
     m.def("variant_copyable", [](std::variant<Copyable, int> &) {});
-    m.def("variant_copyable_none", [](std::variant<std::monostate, Copyable, int> &) {}, nb::arg("x").none());
+    m.def("variant_copyable_none", [](std::variant<std::monostate, int, Copyable> &) {}, nb::arg("x").none());
     m.def("variant_copyable_ptr", [](std::variant<Copyable *, int> &) {});
     m.def("variant_copyable_ptr_none", [](std::variant<Copyable *, int> &) {}, nb::arg("x").none());
     m.def("variant_ret_var_copyable", []() { return std::variant<Copyable, int>(); });
     m.def("variant_ret_var_none", []() { return std::variant<std::monostate, Copyable, int>(); });
     m.def("variant_unbound_type", [](std::variant<std::monostate, nb::list, nb::tuple, int> &x) { return x; },
           nb::arg("x") = nb::none());
+    m.def("variant_nondefault",
+          [](std::variant<NonDefaultConstructible, int> v) {
+              return v.index() == 0 ? std::get<0>(v).value : -std::get<1>(v);
+          });
 
     // ----- test50-test57 ------
     m.def("map_return_movable_value", [](){
@@ -400,11 +435,14 @@ NB_MODULE(test_stl_ext, m) {
         },
         nb::arg("x"));
 
+    // std::filesystem incomplete on GCC 8
+#if !(defined(__GNUC__) && !defined(__clang__) && __GNUC__ <= 8)
     // test66
     m.def("replace_extension", [](std::filesystem::path p, std::string ext) {
         return p.replace_extension(ext);
     });
     m.def("parent_path", [](const std::filesystem::path &p) { return p.parent_path(); });
+#endif
 
     struct ClassWithMovableField {
         std::vector<Movable> movable;
@@ -413,4 +451,81 @@ NB_MODULE(test_stl_ext, m) {
     nb::class_<ClassWithMovableField>(m, "ClassWithMovableField")
         .def(nb::init<>())
         .def_rw("movable", &ClassWithMovableField::movable);
+
+    // test67 std::vector<bool>
+    m.def("flip_vector_bool", [](std::vector<bool> vec) {
+        vec.flip();
+        return vec;
+    });
+
+
+    m.def("complex_value_float", [](const std::complex<float>& x) {
+        return x;
+    });
+    m.def("complex_value_float_nc", [](const std::complex<float>& x) {
+        return x;
+    }, nb::arg().noconvert());
+    m.def("complex_value_double", [](const std::complex<double>& x) {
+        return x;
+    });
+    m.def("complex_value_double_nc", [](const std::complex<double>& x) {
+        return x;
+    }, nb::arg().noconvert());
+
+    m.def("complex_array_float", [](const std::vector<std::complex<float>>& x) {
+        return x;
+    });
+    m.def("complex_array_double", [](const std::vector<std::complex<double>>& x) {
+        return x;
+    });
+
+    m.def("vector_str", [](const std::vector<std::string>& x){
+        return x;
+    });
+    m.def("vector_str", [](std::string& x){
+        return x;
+    });
+
+    m.def("vector_optional_str", [](const std::vector<std::optional<std::string>>& x) {
+        return x;
+    });
+
+    m.def("pass_wstr", [](std::wstring ws) { return ws; });
+
+    // uncomment to see compiler error:
+    // m.def("optional_intptr", [](std::optional<int*>) {});
+    m.def("optional_cstr", [](std::optional<const char*> arg) {
+        return arg.value_or("none");
+    }, nb::arg().none());
+
+
+    // test74
+    struct BasicID1 {
+        uint64_t id;
+        BasicID1(uint64_t id) : id(id) {}
+    };
+
+    struct BasicID2 {
+        uint64_t id;
+        BasicID2(uint64_t id) : id(id) {}
+    };
+
+    nb::class_<BasicID1>(m, "BasicID1")
+        .def(nb::init<uint64_t>())
+        .def("__int__", [](const BasicID1& x) { return x.id; })
+        ;
+
+    nb::class_<BasicID2>(m, "BasicID2")
+        .def(nb::init_implicit<uint64_t>());
+
+    using IDVariants = std::variant<std::monostate, BasicID2, BasicID1>;
+
+    struct IDHavingEvent {
+        IDVariants id;
+        IDHavingEvent() = default;
+    };
+
+    nb::class_<IDHavingEvent>(m, "IDHavingEvent")
+        .def(nb::init<>())
+        .def_rw("id", &IDHavingEvent::id);
 }

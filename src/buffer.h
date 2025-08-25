@@ -1,5 +1,8 @@
 #pragma once
+
 #include <string.h>
+#include <stdarg.h>
+#include <stdio.h> // vsnprintf
 
 NAMESPACE_BEGIN(NB_NAMESPACE)
 NAMESPACE_BEGIN(detail)
@@ -12,8 +15,7 @@ public:
     Buffer &operator=(const Buffer &) = delete;
     Buffer &operator=(Buffer &&) = delete;
 
-    Buffer(size_t size = 0)
-        : m_start((char *) malloc(size)) {
+    Buffer(size_t size = 0) : m_start((char *) malloc(size)) {
         if (!m_start) {
             fprintf(stderr, "Buffer::Buffer(): out of memory (unrecoverable error)!");
             abort();
@@ -133,7 +135,7 @@ public:
     size_t remain() const { return (size_t) (m_end - m_cur); }
 
 private:
-    void expand(size_t minval = 2) {
+    NB_NOINLINE void expand(size_t minval = 2) {
         size_t old_alloc_size = m_end - m_start,
                new_alloc_size = 2 * old_alloc_size + minval,
                used_size      = (size_t) (m_cur - m_start),

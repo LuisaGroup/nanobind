@@ -30,7 +30,7 @@ prior instantiation of ``nb::class_<SomeType>``), or an exception will be
 thrown.
 
 The "preview" of the default argument in the function signature is generated
-using the object's ``__repr__`` method. If not available, the signature may not
+using the object's ``__str__`` method. If not available, the signature may not
 be very helpful, e.g.:
 
 .. code-block:: pycon
@@ -42,6 +42,16 @@ be very helpful, e.g.:
     ....
     |  f(...)
     |      f(self, value: my_ext.SomeType = <my_ext.SomeType object at 0x1004d7230>) -> None
+
+
+In such cases, you can either refine the implementation of the type in question
+or manually override how nanobind renders the default value using the
+:cpp:func:`.sig("string") method <arg::sig>`:
+
+.. code-block:: cpp
+
+   nb::class_<MyClass>(m, "MyClass")
+       .def("f", &MyClass::f, "value"_a.sig("SomeType(123)") = SomeType(123));
 
 
 .. _noconvert:
@@ -94,7 +104,7 @@ The same experiment now fails with a ``TypeError``:
    Invoked with types: int
 
 You may, of course, combine this with the ``_a`` shorthand notation (see the
-section on :ref:`keyword arguments <keyword_and_default_args>`) or use specify
+section on :ref:`keyword arguments <keyword_and_default_args>`) or specify
 *unnamed* non-converting arguments using :cpp:func:`nb::arg().noconvert()
 <arg::noconvert>`.
 
@@ -158,10 +168,30 @@ to reflect this fact.
    >>> my_ext.bark.__doc__
    'bark(dog: Optional[my_ext.Dog]) -> str'
 
+You may also specify a ``None`` default argument value, in which case the
+annotation can be omitted:
+
+.. code-block:: cpp
+
+   m.def("bark", &bark, nb::arg("dog") = nb::none());
+
 Note that passing values *by pointer* (including null pointers) is only
 supported for :ref:`bound <bindings>` types. :ref:`Type casters <type_casters>`
 and :ref:`wrappers <wrappers>` cannot be used in such cases and will produce
 compile-time errors.
+
+Alternatively, you can also use ``std::optional<T>`` to pass an optional
+argument *by value*. To use it, you must include the header file associated
+needed by its type caster:
+
+.. code-block:: cpp
+
+   #include <nanobind/stl/optional.h>
+
+   NB_MODULE(my_ext, m) {
+       m.def("bark", [](std::optional<Dog> d) { ... }, nb::arg("dog") = nb::none());
+   }
+
 
 .. _overload_resolution:
 
@@ -225,11 +255,10 @@ The class :cpp:class:`nb::args <args>` derives from :cpp:class:`nb::tuple
 <dict>`.
 
 You may also use them individually or even combine them with ordinary
-arguments. Note, however, that :cpp:class:`nb::args <args>` and
-:cpp:class:`nb::kwargs <kwargs>` must always be the last arguments of the
-function, and in that order if both are specified. This is a restriction
-compared to pybind11, which allowed more general arrangements. nanobind also
-lacks the ``kw_only`` and ``pos_only`` annotations available in pybind11.
+parameters. Note that :cpp:class:`nb::kwargs <kwargs>` must be the last
+parameter if it is specified, and any parameters after
+:cpp:class:`nb::args <args>` are implicitly :ref:`keyword-only <kw_only>`,
+just like in regular Python.
 
 .. _args_kwargs_2:
 
@@ -270,6 +299,66 @@ Here is an example use of the above extension in Python:
    >>> my_ext.my_call(x)
    (1, 'positional')
    {'keyword': 'value'}
+
+
+.. _kw_only:
+
+Keyword-only parameters
+-----------------------
+
+Python supports keyword-only parameters; these can't be filled positionally,
+thus requiring the caller to specify their name. They can be used
+to enforce more clarity at call sites if a function has
+multiple paramaters that could be confused with each other, or to accept
+named options alongside variadic ``*args``.
+
+.. code-block:: python
+
+    def example(val: int, *, check: bool) -> None:
+        # val can be passed either way; check must be given as a keyword arg
+        pass
+
+    example(val=42, check=True)   # good
+    example(check=False, val=5)   # good
+    example(100, check=True)      # good
+    example(200, False)           # TypeError:
+        # example() takes 1 positional argument but 2 were given
+
+    def munge(*args: int, invert: bool = False) -> int:
+        return sum(args) * (-1 if invert else 1)
+
+    munge(1, 2, 3)                # 6
+    munge(4, 5, 6, invert=True)   # -15
+
+nanobind provides a :cpp:struct:`nb::kw_only() <kw_only>` annotation
+that allows you to produce bindings that behave like these
+examples. It must be placed before the :cpp:struct:`nb::arg() <arg>`
+annotation for the first keyword-only parameter; you can think of it
+as equivalent to the bare ``*,`` in a Python function signature. For
+example, the above examples could be written in C++ as:
+
+.. code-block:: cpp
+
+    void example(int val, bool check);
+    int munge(nb::args args, bool invert);
+
+    m.def("example", &example,
+          nb::arg("val"), nb::kw_only(), nb::arg("check"));
+
+    // Parameters after *args are implicitly keyword-only:
+    m.def("munge", &munge,
+          nb::arg("args"), nb::arg("invert"));
+
+    // But you can be explicit about it too, as long as you put the
+    // kw_only annotation in the correct position:
+    m.def("munge", &munge,
+          nb::arg("args"), nb::kw_only(), nb::arg("invert"));
+
+.. note:: nanobind does *not* support the ``pos_only()`` argument annotation
+   provided by pybind11, which marks the parameters before it as positional-only.
+   However, a parameter can be made effectively positional-only by giving it
+   no name (using an empty :cpp:struct:`nb::arg() <arg>` specifier).
+
 
 .. _function_templates:
 
@@ -319,17 +408,24 @@ appends an entry to a log data structure.
 
     nb::class_<Log>(m, "Log")
         .def("append",
-             [](Log &log, Entry *entry) { ... },
+             [](Log &log, Entry *entry) -> void { ... },
              nb::keep_alive<1, 2>());
 
 Here, ``Nurse = 1`` refers to the ``log`` argument, while ``Patient = 2``
-refers to ``entry``. See the definition of :cpp:class:`nb::keep_alive
-<keep_alive>` for details on the numbering convention.
+refers to ``entry``. Setting ``Nurse/Patient = 0`` would select the function
+return value (here, the function doesn't return anything, so ``0`` is not a
+valid choice).
 
 The example uses the annotation to tie the lifetime of the ``entry`` to that of
-the ``log``. Without it, Python may delete the ``Entry`` instance at a later
-point, which would be problematic if ``Log`` did not make a copy but references
-the instance through its pointer address.
+``log``. Without it, Python could potentially delete ``entry`` *before*
+``log``, which would be problematic if the ``log.append()`` operation causes
+``log`` to reference ``entry`` through a pointer address instead of making a
+copy. Whether or not this is a good design is another question (for example,
+shared ownership via ``std::shared_ptr<T>`` or intrusive reference counting
+would avoid the problem altogether).
+
+See the definition of :cpp:class:`nb::keep_alive <keep_alive>` for further
+discussion and limitations of this method.
 
 .. _call_guards:
 
@@ -362,6 +458,13 @@ to permit parallel execution.
 Multiple guards should be specified as :cpp:class:`nb::call_guard\<T1, T2,
 T3...\> <call_guard>`. Construction occurs left to right, while destruction
 occurs in reverse.
+
+If your wrapping needs are more complex than
+:cpp:class:`nb::call_guard\<T\>() <call_guard>` can handle, it is also
+possible to define a custom "call policy", which can observe or modify the
+Python object arguments and observe the return value. See the documentation of
+:cpp:class:`nb::call_policy\<Policy\> <call_policy>` for details.
+
 
 .. _higher_order_adv:
 
@@ -448,3 +551,59 @@ The following interactive session shows how to call them from Python.
    This functionality is very useful when generating bindings for callbacks in
    C++ libraries (e.g. GUI libraries, asynchronous networking libraries,
    etc.).
+
+.. _binding-overheads:
+
+Minimizing binding overheads
+----------------------------
+
+The code that dispatches function calls from Python to C++ is in general
+:ref:`highly optimized <benchmarks>`. When it is important to further reduce
+binding overheads to an absolute minimum, consider removing annotations for
+:ref:`keyword and default arguments <keyword_and_default_args>` along with
+other advanced binding annotations.
+
+In the snippet below, ``f1`` has lower binding overheads compared to ``f2``.
+
+.. code-block:: cpp
+
+   NB_MODULE(my_ext, m) {
+       m.def("f1", [](int) { /* no-op */ });
+       m.def("f2", [](int) { /* no-op */ }, "arg"_a);
+   }
+
+This is because ``f1``:
+
+1. Does *not* use any of the following advanced argument annotations features:
+
+   - **Named function arguments**, e.g., :cpp:class:`nb::arg("name") <arg>` or ``"name"_a``.
+
+   - **Default argument values**, e.g., :cpp:func:`nb::arg() = 0 <arg::operator=>` or ``"name"_a = false``.
+
+   - **Nullability** or **implicit conversion** flags, e.g.,
+     :cpp:func:`nb::arg().none() <arg::none>` or :cpp:func:`"name"_a.noconvert()
+     <arg::noconvert>`.
+
+2. Has no :cpp:class:`nb::keep_alive\<Nurse, Patient\>() <keep_alive>`
+   annotations.
+
+3. Takes no variable-length positional (:cpp:class:`nb::args <args>`) or keyword
+   (:cpp:class:`nb::kwargs <kwargs>`) arguments.
+
+4. Has a to total of **8 or fewer** function arguments.
+
+If all of the above conditions are satisfied, nanobind switches to a
+specialized dispatcher that is optimized to handle a small number of positional
+arguments. Otherwise, it uses the default dispatcher that works in any
+situation. It is also worth noting that functions with many overloads generally
+execute more slowly, since nanobind must first select a suitable one.
+
+These differences are mainly of interest when a function that does *very
+little* is called at a *very high rate*, in which case binding overheads can
+become noticeable.
+
+Regarding point 1 of the above list, note that **locking** is okay, as long as
+the annotation does not provide an argument name. In other words, a function
+binding with a :cpp:func:`nb::arg().lock() <arg::lock>` for some of its arguments stays on the fast
+path. This is mainly of interest for :ref:`free-threaded <free-threaded>`
+extensions.

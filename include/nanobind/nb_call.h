@@ -35,6 +35,9 @@ args_proxy api<Derived>::operator*() const {
 template <typename T>
 NB_INLINE void call_analyze(size_t &nargs, size_t &nkwargs, const T &value) {
     using D = std::decay_t<T>;
+    static_assert(!std::is_base_of_v<arg_locked, D>,
+                  "nb::arg().lock() may be used only when defining functions, "
+                  "not when calling them");
 
     if constexpr (std::is_same_v<D, arg_v>)
         nkwargs++;
@@ -58,14 +61,16 @@ NB_INLINE void call_init(PyObject **args, PyObject *kwnames, size_t &nargs,
     if constexpr (std::is_same_v<D, arg_v>) {
         args[kwargs_offset + nkwargs] = value.value.release().ptr();
         NB_TUPLE_SET_ITEM(kwnames, nkwargs++,
-                         PyUnicode_InternFromString(value.name));
+                         PyUnicode_InternFromString(value.name_));
     } else if constexpr (std::is_same_v<D, args_proxy>) {
         for (size_t i = 0, l = len(value); i < l; ++i)
             args[nargs++] = borrow(value[i]).release().ptr();
     } else if constexpr (std::is_same_v<D, kwargs_proxy>) {
         PyObject *key, *entry;
         Py_ssize_t pos = 0;
-
+#if defined(NB_FREE_THREADED)
+        ft_object_guard guard(value);
+#endif
         while (PyDict_Next(value.ptr(), &pos, &key, &entry)) {
             Py_INCREF(key); Py_INCREF(entry);
             args[kwargs_offset + nkwargs] = entry;
@@ -73,8 +78,7 @@ NB_INLINE void call_init(PyObject **args, PyObject *kwnames, size_t &nargs,
         }
     } else {
         args[nargs++] =
-            make_caster<T>::from_cpp((forward_t<T>) value,
-                                     detail::infer_policy<T>(policy), nullptr).ptr();
+            make_caster<T>::from_cpp((forward_t<T>) value, policy, nullptr).ptr();
     }
     (void) args; (void) kwnames; (void) nargs;
     (void) nkwargs; (void) kwargs_offset;

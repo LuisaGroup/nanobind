@@ -45,29 +45,50 @@ NAMESPACE_BEGIN(detail)
 
 template <typename T, typename Deleter>
 struct type_caster<std::unique_ptr<T, Deleter>> {
+    static constexpr bool IsClass = true;
     using Value = std::unique_ptr<T, Deleter>;
     using Caster = make_caster<T>;
+    using Td = std::decay_t<T>;
 
     static constexpr bool IsDefaultDeleter =
         std::is_same_v<Deleter, std::default_delete<T>>;
     static constexpr bool IsNanobindDeleter =
         std::is_same_v<Deleter, deleter<T>>;
 
-    static_assert(Caster::IsClass,
-                  "Binding 'std::unique_ptr<T>' requires that 'T' can also be "
-                  "bound by nanobind. It appears that you specified a type which "
-                  "would undergo conversion/copying, which is not allowed.");
+    static_assert(is_base_caster_v<Caster>,
+                  "Conversion of ``unique_ptr<T>`` requires that ``T`` is "
+                  "handled by nanobind's regular class binding mechanism. "
+                  "However, a type caster was registered to intercept this "
+                  "particular type, which is not allowed.");
 
     static_assert(IsDefaultDeleter || IsNanobindDeleter,
-                  "Binding std::unique_ptr<T, Deleter> requires that 'Deleter' is either "
-                  "'std::default_delete<T>' or 'nanobind::deleter<T>'");
+                  "Binding std::unique_ptr<T, Deleter> requires that "
+                  "'Deleter' is either 'std::default_delete<T>' or "
+                  "'nanobind::deleter<T>'");
 
     static constexpr auto Name = Caster::Name;
-    static constexpr bool IsClass = true;
     template <typename T_> using Cast = Value;
 
     Caster caster;
     handle src;
+
+    /* If true, the Python object has relinquished ownership but we have
+       not yet yielded a unique_ptr that holds ownership on the C++ side.
+
+       `nb_type_relinquish_ownership()` can fail, so we must check it in
+       `can_cast()`. If we do so, but then wind up not executing the cast
+       operator, we must remember to undo our relinquishment and push the
+       ownership back onto the Python side. For example, this might be
+       necessary if the Python object `[(foo, foo)]` is converted to
+       `std::vector<std::pair<std::unique_ptr<T>, std::unique_ptr<T>>>`;
+       the pair caster won't know that it can't cast the second element
+       until after it's verified that it can cast the first one. */
+    mutable bool inflight = false;
+
+    ~type_caster() {
+        if (inflight)
+            nb_type_restore_ownership(src.ptr(), IsDefaultDeleter);
+    }
 
     bool from_python(handle src_, uint8_t, cleanup_list *) noexcept {
         // Stash source python object
@@ -96,16 +117,18 @@ struct type_caster<std::unique_ptr<T, Deleter>> {
         if constexpr (IsNanobindDeleter)
             cpp_delete = value.get_deleter().owned_by_cpp();
 
-        T *ptr = value.get();
-        const std::type_info *type = &typeid(T);
+        Td *ptr = (Td *) value.get();
+        const std::type_info *type = &typeid(Td);
+        if (!ptr)
+            return none().release();
 
         constexpr bool has_type_hook =
-            !std::is_base_of_v<std::false_type, type_hook<T>>;
+            !std::is_base_of_v<std::false_type, type_hook<Td>>;
         if constexpr (has_type_hook)
-            type = type_hook<T>::get(ptr);
+            type = type_hook<Td>::get(ptr);
 
         handle result;
-        if constexpr (!std::is_polymorphic_v<T>) {
+        if constexpr (!std::is_polymorphic_v<Td>) {
             result = nb_type_put_unique(type, ptr, cleanup, cpp_delete);
         } else {
             const std::type_info *type_p =
@@ -124,14 +147,30 @@ struct type_caster<std::unique_ptr<T, Deleter>> {
         return result;
     }
 
-    explicit operator Value() {
-        nb_type_relinquish_ownership(src.ptr(), IsDefaultDeleter);
+    template <typename T_>
+    bool can_cast() const noexcept {
+        if (src.is_none() || inflight)
+            return true;
+        else if (!nb_type_relinquish_ownership(src.ptr(), IsDefaultDeleter))
+            return false;
+        inflight = true;
+        return true;
+    }
 
-        T *value = caster.operator T *();
+    explicit operator Value() {
+        if (!inflight && !src.is_none() &&
+            !nb_type_relinquish_ownership(src.ptr(), IsDefaultDeleter))
+            throw next_overload();
+
+        Td *p = caster.operator Td *();
+
+        Value value;
         if constexpr (IsNanobindDeleter)
-            return Value(value, deleter<T>(src.inc_ref()));
+            value = Value(p, deleter<T>(src.inc_ref()));
         else
-            return Value(value);
+            value = Value(p);
+        inflight = false;
+        return value;
     }
 };
 

@@ -22,28 +22,15 @@ template <typename T1, typename T2> struct type_caster<std::pair<T1, T2>> {
     using Caster1 = make_caster<T1>;
     using Caster2 = make_caster<T2>;
 
-    /**
-     * \brief Target type for extracting the result of a `from_python` cast
-     * using the C++ cast operator (see operator Value() below)
-     *
-     * The std::pair type caster is slightly restricted: to support pairs
-     * containing references, the pair is constructed on the fly in the cast
-     * operator. Other classes will typically specify the more general
-     *
-     * ```
-     * template <typename T> using Cast = default_cast_t<T_>;
-     * // or, even better:
-     * template <typename T> using Cast = movable_cast_t<T_>;
-     * ```
-     *
-     * which can also cast to pointers, or lvalue/rvalue references.
-     */
+    /// This caster constructs instances on the fly (otherwise it would not be
+    /// able to handle pairs containing references). Because of this, only the
+    /// `operator Value()` cast operator is implemented below, and the type
+    /// alias below informs users of this class of this fact.
     template <typename T> using Cast = Value;
 
     // Value name for docstring generation
     static constexpr auto Name =
         const_name(NB_TYPING_TUPLE "[") + concat(Caster1::Name, Caster2::Name) + const_name("]");
-    static constexpr bool IsClass = false;
 
     /// Python -> C++ caster, populates `caster1` and `caster2` upon success
     bool from_python(handle src, uint8_t flags,
@@ -71,12 +58,12 @@ template <typename T1, typename T2> struct type_caster<std::pair<T1, T2>> {
     static handle from_cpp(T &&value, rv_policy policy,
                            cleanup_list *cleanup) noexcept {
         object o1 = steal(
-            Caster1::from_cpp(forward_like<T>(value.first), policy, cleanup));
+            Caster1::from_cpp(forward_like_<T>(value.first), policy, cleanup));
         if (!o1.is_valid())
             return {};
 
         object o2 = steal(
-            Caster2::from_cpp(forward_like<T>(value.second), policy, cleanup));
+            Caster2::from_cpp(forward_like_<T>(value.second), policy, cleanup));
         if (!o2.is_valid())
             return {};
 
@@ -86,16 +73,15 @@ template <typename T1, typename T2> struct type_caster<std::pair<T1, T2>> {
         return r;
     }
 
-    /// Return the constructed tuple by copying from the sub-casters
-    explicit operator Value() & {
-        return Value(caster1.operator cast_t<T1>(),
-                     caster2.operator cast_t<T2>());
+    template <typename T>
+    bool can_cast() const noexcept {
+        return caster1.template can_cast<T1>() && caster2.template can_cast<T2>();
     }
 
-    // Return the constructed type by moving from the sub-casters
-    explicit operator Value() && {
-        return Value(((Caster1 &&) caster1).operator cast_t<T1>(),
-                     ((Caster2 &&) caster2).operator cast_t<T2>());
+    /// Return the constructed tuple by copying from the sub-casters
+    explicit operator Value() {
+        return Value(caster1.operator cast_t<T1>(),
+                     caster2.operator cast_t<T2>());
     }
 
     Caster1 caster1;

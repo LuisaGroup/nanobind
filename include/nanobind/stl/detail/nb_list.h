@@ -14,9 +14,10 @@
 NAMESPACE_BEGIN(NB_NAMESPACE)
 NAMESPACE_BEGIN(detail)
 
-template <typename Value_, typename Entry> struct list_caster {
-    NB_TYPE_CASTER(Value_, const_name(NB_TYPING_LIST "[") +
-                               make_caster<Entry>::Name + const_name("]"));
+template <typename List, typename Entry> struct list_caster {
+    NB_TYPE_CASTER(List, io_name(NB_TYPING_SEQUENCE, NB_TYPING_LIST) +
+                              const_name("[") + make_caster<Entry>::Name +
+                              const_name("]"))
 
     using Caster = make_caster<Entry>;
 
@@ -32,19 +33,22 @@ template <typename Value_, typename Entry> struct list_caster {
 
         value.clear();
 
-        if constexpr (is_detected_v<has_reserve, Value_>)
+        if constexpr (is_detected_v<has_reserve, List>)
             value.reserve(size);
 
         Caster caster;
         bool success = o != nullptr;
 
+        flags = flags_for_local_caster<Entry>(flags);
+
         for (size_t i = 0; i < size; ++i) {
-            if (!caster.from_python(o[i], flags, cleanup)) {
+            if (!caster.from_python(o[i], flags, cleanup) ||
+                !caster.template can_cast<Entry>()) {
                 success = false;
                 break;
             }
 
-            value.push_back(((Caster &&) caster).operator cast_t<Entry &&>());
+            value.push_back(caster.operator cast_t<Entry>());
         }
 
         Py_XDECREF(temp);
@@ -59,8 +63,8 @@ template <typename Value_, typename Entry> struct list_caster {
         if (ret.is_valid()) {
             Py_ssize_t index = 0;
 
-            for (auto &value : src) {
-                handle h = Caster::from_cpp(forward_like<T>(value), policy, cleanup);
+            for (auto &&value : src) {
+                handle h = Caster::from_cpp(forward_like_<T>(value), policy, cleanup);
 
                 if (!h.is_valid()) {
                     ret.reset();

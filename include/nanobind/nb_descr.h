@@ -25,6 +25,7 @@ struct descr {
     constexpr descr(char c, Cs... cs) : text{c, static_cast<char>(cs)..., '\0'} { }
 
     constexpr size_t type_count() const { return sizeof...(Ts); }
+    constexpr size_t size() const { return N; }
 
     NB_INLINE void put_types(const std::type_info **out) const {
         size_t ctr = 0;
@@ -77,6 +78,33 @@ constexpr auto const_name(const T1 &d1, const T2 &d2) {
         return d2;
 }
 
+// Use a different name based on whether the parameter is used as input or output
+template <size_t N1, size_t N2>
+constexpr auto io_name(char const (&text1)[N1], char const (&text2)[N2]) {
+    return const_name('@') + const_name(text1) + const_name('@') +
+           const_name(text2) + const_name('@');
+}
+
+#if PY_VERSION_HEX < 0x030A0000
+template <typename T> constexpr auto optional_name(const T &v) {
+    return const_name("typing.Optional[") + v + const_name("]");
+}
+template <typename... Ts> constexpr auto union_name(const Ts&... vs) {
+    return const_name("typing.Union[") + concat(vs...) + const_name("]");
+}
+#else
+template <typename T> constexpr auto optional_name(const T &v) {
+    return v + const_name(" | None");
+}
+template <typename T> constexpr auto union_name(const T &v) {
+    return v;
+}
+template <typename T1, typename T2, typename... Ts>
+constexpr auto union_name(const T1 &v1, const T2 &v2, const Ts &...vs) {
+    return v1 + const_name(" | ") + union_name(v2, vs...);
+}
+#endif
+
 template <size_t Size>
 auto constexpr const_name() -> std::remove_cv_t<decltype(int_to_str<Size / 10, Size % 10>::digits)> {
     return int_to_str<Size / 10, Size % 10>::digits;
@@ -99,15 +127,23 @@ constexpr auto concat(const descr<N, Ts...> &d, const Args &...args)
     return d + const_name(", ") + concat(args...);
 }
 
+template <typename... Args>
+constexpr auto concat_maybe(const descr<0> &, const descr<0> &, const Args &...args)
+    -> decltype(concat_maybe(args...)) { return concat_maybe(args...); }
+
 template <size_t N, typename... Ts, typename... Args>
-constexpr auto concat_maybe(const descr<N, Ts...> &d, const Args &... args)
-    -> decltype(
-        std::declval<descr<N + sizeof...(Ts) == 0 ? 0 : (N + 2), Ts...>>() +
-        concat_maybe(args...)) {
-    if constexpr (N + sizeof...(Ts) == 0)
-        return concat_maybe(args...);
-    else
-        return d + const_name(", ") + concat_maybe(args...);
+constexpr auto concat_maybe(const descr<0> &, const descr<N, Ts...> &arg, const Args &...args)
+    -> decltype(concat_maybe(arg, args...)) { return concat_maybe(arg, args...); }
+
+template <size_t N, typename... Ts, typename... Args>
+constexpr auto concat_maybe(const descr<N, Ts...> &arg, const descr<0> &, const Args &...args)
+    -> decltype(concat_maybe(arg, args...)) { return concat_maybe(arg, args...); }
+
+template <size_t N, size_t N2, typename... Ts, typename... Ts2, typename... Args,
+          enable_if_t<N != 0 && N2 != 0> = 0>
+constexpr auto concat_maybe(const descr<N, Ts...> &arg0, const descr<N2, Ts2...> &arg1, const Args &...args)
+    -> decltype(concat(arg0, concat_maybe(arg1, args...))) {
+    return concat(arg0, concat_maybe(arg1, args...));
 }
 
 template <size_t N, typename... Ts>
