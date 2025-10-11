@@ -110,7 +110,9 @@ void raise_next_overload_if_null(void *p) {
         throw next_overload();
 }
 
-void raise_cast_error() {
+void raise_python_or_cast_error() {
+    if (PyErr_Occurred())
+        throw python_error();
     throw cast_error();
 }
 
@@ -138,16 +140,6 @@ void cleanup_list::expand() noexcept {
 }
 
 // ========================================================================
-
-PyObject *module_new(const char *name, PyModuleDef *def) noexcept {
-    memset(def, 0, sizeof(PyModuleDef));
-    def->m_name = name;
-    def->m_size = -1;
-    PyObject *m = PyModule_Create(def);
-
-    check(m, "nanobind::detail::module_new(): allocation failed!");
-    return m;
-}
 
 PyObject *module_import(const char *name) {
     PyObject *res = PyImport_ImportModule(name);
@@ -325,7 +317,7 @@ end:
 
     if (!res) {
         if (cast_error)
-            raise_cast_error();
+            raise_python_or_cast_error();
         else if (gil_error)
             raise("nanobind::detail::obj_vectorcall(): PyGILState_Check() failure.");
         else
@@ -815,8 +807,14 @@ PyObject **seq_get_with_size(PyObject *seq, size_t size,
         }
 #  endif
     } else if (PySequence_Check(seq)) {
-        temp = PySequence_Tuple(seq);
+        Py_ssize_t size_seq = PySequence_Size(seq);
+        if (size_seq != (Py_ssize_t) size) {
+            if (size_seq == -1)
+                PyErr_Clear();
+            return nullptr;
+        }
 
+        temp = PySequence_Tuple(seq);
         if (temp)
             result = seq_get_with_size(temp, size, temp_out);
         else
@@ -917,7 +915,7 @@ void property_install_static(PyObject *scope, const char *name,
 void tuple_check(PyObject *tuple, size_t nargs) {
     for (size_t i = 0; i < nargs; ++i) {
         if (!NB_TUPLE_GET_ITEM(tuple, i))
-            raise_cast_error();
+            raise_python_or_cast_error();
     }
 }
 

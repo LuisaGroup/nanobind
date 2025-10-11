@@ -12,9 +12,9 @@ int destruct_count = 0;
 static float f_global[] { 1, 2, 3, 4, 5, 6, 7, 8 };
 static int i_global[] { 1, 2, 3, 4, 5, 6, 7, 8 };
 
-#if defined(__aarch64__)
+#if defined(__aarch64__) || defined(__AVX512FP16__)
 namespace nanobind::detail {
-    template <> struct dtype_traits<__fp16> {
+    template <> struct dtype_traits<_Float16> {
         static constexpr dlpack::dtype value {
             (uint8_t) dlpack::dtype_code::Float, // type code
             16, // size in bits
@@ -240,7 +240,8 @@ NB_MODULE(test_ndarray_ext, m) {
     });
 
     m.def("destruct_count", []() { return destruct_count; });
-    m.def("return_dlpack", []() {
+
+    m.def("return_no_framework", []() {
         float *f = new float[8] { 1, 2, 3, 4, 5, 6, 7, 8 };
         size_t shape[2] = { 2, 4 };
 
@@ -299,16 +300,28 @@ NB_MODULE(test_ndarray_ext, m) {
                                                                 deleter);
     });
 
+    m.def("ret_memview", []() {
+        double *d = new double[8] { 1, 2, 3, 4, 5, 6, 7, 8 };
+        size_t shape[2] = { 2, 4 };
+
+        nb::capsule deleter(d, [](void *data) noexcept {
+           destruct_count++;
+           delete[] (double *) data;
+        });
+
+        return nb::ndarray<nb::memview, double, nb::shape<2, 4>>(d, 2, shape,
+                                                                 deleter);
+    });
+
     m.def("ret_array_scalar", []() {
-            float* f = new float[1] { 1 };
-            size_t shape[1] = {};
+            float* f = new float{ 1.0f };
 
             nb::capsule deleter(f, [](void* data) noexcept {
                 destruct_count++;
-                delete[] (float *) data;
+                delete (float *) data;
             });
 
-            return nb::ndarray<nb::numpy, float>(f, 0, shape, deleter);
+            return nb::ndarray<nb::numpy, float>(f, 0, nullptr, deleter);
     });
 
     m.def("noop_3d_c_contig",
@@ -392,17 +405,17 @@ NB_MODULE(test_ndarray_ext, m) {
             v(i) = -v(i);
     }, "x"_a.noconvert());
 
-#if defined(__aarch64__)
+#if defined(__aarch64__) || defined(__AVX512FP16__)
     m.def("ret_numpy_half", []() {
-        __fp16 *f = new __fp16[8] { 1, 2, 3, 4, 5, 6, 7, 8 };
+        _Float16 *f = new _Float16[8] { 1, 2, 3, 4, 5, 6, 7, 8 };
         size_t shape[2] = { 2, 4 };
 
         nb::capsule deleter(f, [](void *data) noexcept {
             destruct_count++;
-            delete[] (__fp16*) data;
+            delete[] (_Float16*) data;
         });
-        return nb::ndarray<nb::numpy, __fp16, nb::shape<2, 4>>(f, 2, shape,
-                                                               deleter);
+        return nb::ndarray<nb::numpy, _Float16, nb::shape<2, 4>>(f, 2, shape,
+                                                                 deleter);
     });
 #endif
 

@@ -103,7 +103,7 @@ NB_CORE void fail(const char *fmt, ...) noexcept;
 NB_CORE void raise_next_overload_if_null(void *p);
 
 /// Raise nanobind::cast_error
-[[noreturn]] NB_CORE void raise_cast_error();
+[[noreturn]] NB_CORE void raise_python_or_cast_error();
 
 // ========================================================================
 
@@ -273,8 +273,11 @@ NB_CORE PyObject *capsule_new(const void *ptr, const char *name,
 
 // ========================================================================
 
+// Forward declaration for type in nb_attr.h
+struct func_data_prelim_base;
+
 /// Create a Python function object for the given function record
-NB_CORE PyObject *nb_func_new(const void *data) noexcept;
+NB_CORE PyObject *nb_func_new(const func_data_prelim_base *data) noexcept;
 
 // ========================================================================
 
@@ -451,9 +454,6 @@ NB_CORE PyObject *module_import(const char *name);
 
 /// Try to import a Python extension module, raises an exception upon failure
 NB_CORE PyObject *module_import(PyObject *name);
-
-/// Create a new extension module with the given name
-NB_CORE PyObject *module_new(const char *name, PyModuleDef *def) noexcept;
 
 /// Create a submodule of an existing module
 NB_CORE PyObject *module_new_submodule(PyObject *base, const char *name,
