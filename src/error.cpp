@@ -163,7 +163,7 @@ const char *python_error::what() const noexcept {
         PyFrameObject *frame = to->tb_frame;
         Py_XINCREF(frame);
 
-        std::vector<PyFrameObject *, py_allocator<PyFrameObject *>> frames;
+        std::stl_vector<PyFrameObject *, py_allocator<PyFrameObject *>> frames;
 
         while (frame) {
             frames.push_back(frame);

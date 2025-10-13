@@ -127,7 +127,7 @@ def test09_maketuple():
     with pytest.raises(RuntimeError) as excinfo:
         assert t.test_bad_tuple()
     value = str(excinfo.value)
-    assert value == "std::bad_cast" or value == "bad cast"
+    assert value == "nbstl::bad_cast" or value == "bad cast"
 
 
 def test10_cpp_call_simple():

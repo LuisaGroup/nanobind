@@ -10,18 +10,26 @@ add_includedirs("include", "ext/robin_map/include", {
 add_files("src/nb_combined.cpp")
 on_load(function(target)
     local function split_str(str, chr, func)
-        for part in string.gmatch(str, "([^" .. chr .. "]+)") do
-            func(part)
+        local kv = str:split(chr, {
+            plain = true
+        })
+        for _, v in ipairs(kv) do
+            func(v)
         end
     end
     local lc_py_include = get_config("lc_py_include")
+    local lc_py_linkdir = get_config("lc_py_linkdir")
+    local lc_py_libs = get_config("lc_py_libs")
+    if (not lc_py_include) or (not lc_py_linkdir) or (not lc_py_libs) then
+        utils.error("Python not found, nanobind disabled.")
+        target:set("enabled", false)
+        return
+    end
     split_str(lc_py_include, ';', function(v)
         target:add("includedirs", v, {
             public = true
         })
     end)
-    local lc_py_linkdir = get_config("lc_py_linkdir")
-    local lc_py_libs = get_config("lc_py_libs")
     if type(lc_py_linkdir) == "string" then
         split_str(lc_py_linkdir, ';', function(v)
             target:add("linkdirs", v, {
@@ -40,6 +48,7 @@ on_load(function(target)
         public = true
     })
     target:add("defines", "NB_BUILD")
+    target:add("deps", "lc-core")
 end)
 target_end()
 

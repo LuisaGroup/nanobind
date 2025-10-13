@@ -40,6 +40,7 @@
 // IWYU pragma: begin_exports
 #include "nb_python.h"
 #include "nb_defs.h"
+#include "nb_stl.h"
 #include "nb_enums.h"
 #include "nb_traits.h"
 #include "nb_tuple.h"
