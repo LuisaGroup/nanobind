@@ -12,6 +12,9 @@ namespace std
 using namespace ::std;
 using luisa::string;
 using luisa::span;
+using luisa::unique_ptr;
+using luisa::shared_ptr;
+using luisa::vector;
 using eastl::vector;
 template <typename T, typename Alloc>
 using stl_vector = ::std::vector<T, Alloc>;
