@@ -15,6 +15,25 @@ case, both modules must use the same nanobind ABI version, or they will be
 isolated from each other. Releases that don't explicitly mention an ABI version
 below inherit that of the preceding release.
 
+Version TBD (not yet released)
+------------------------------
+
+- ABI version 17. The layout of the `nb_inst` class was changed to fix a data race
+  between `clear_keep_alive` and other bitfields in the same struct (PR `#1191
+  <https://github.com/wjakob/nanobind/pull/1191>`__)
+
+- Nanobind now officially supports **MinGW-w64** and **Intel ICX** (the modern
+  Clang-based Intel compiler). Continuous integration tests have been added to
+  ensure compatibility with these compilers on an ongoing basis.
+
+- The framework ``nb::array_api`` is now available to return an nd-array from
+  C++ to Python as an object that supports both the Python buffer protocol as
+  well as the DLPack methods ``__dlpack__`` and ``_dlpack_device__``.
+  Nanobind now supports importing and exporting nd-arrays via capsules that
+  contain the ``DLManagedTensorVersioned`` struct, which has a flag bit
+  indicating the nd-array is read-only.
+  (PR `#1175 <https://github.com/wjakob/nanobind/pull/1175>`__).
+
 Version 2.9.2 (Sep 4, 2025)
 ---------------------------
 
