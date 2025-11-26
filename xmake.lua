@@ -32,23 +32,24 @@ on_load(function(target)
     end)
     if type(lc_py_linkdir) == "string" then
         split_str(lc_py_linkdir, ';', function(v)
-            target:add("linkdirs", v, {
-                public = true
-            })
+            target:add("linkdirs", v, {public = true})
         end)
     end
     if type(lc_py_libs) == "string" then
         split_str(lc_py_libs, ';', function(v)
-            target:add("links", v, {
-                public = true
-            })
+            target:add("links", v, {public = true})
         end)
     end
     target:add("defines", "NB_SHARED", {
         public = true
     })
     target:add("defines", "NB_BUILD")
+    target:add("defines", 'MS_NO_COREDLL', 'Py_ENABLE_SHARED', {public = true})
     target:add("deps", "lc-core")
+    target:add("cxflags", "/bigobj", {
+        tools = "cl",
+        public = true
+    })
 end)
 target_end()
 
